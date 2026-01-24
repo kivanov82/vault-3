@@ -1,0 +1,51 @@
+{
+  "name": "vault-3",
+  "version": "1.0.0",
+  "description": "Vault 3 is fully automated non-custodial trading and investment strategy",
+  "main": "index.js",
+  "scripts": {
+    "start": "ts-node src/index.ts",
+    "dev": "nodemon --exec ts-node src/index.ts",
+    "test": "npx jest --silent=false",
+    "backfill": "ts-node scripts/backfill-target-vault.ts",
+    "import-csv": "ts-node scripts/import-csv-fills.ts",
+    "docker-build": "docker build -t vault-3 .",
+    "docker-tag": "docker tag vault-3 gcr.io/bright-union/vault-3",
+    "gcloud-auth": "gcloud auth login",
+    "docker-push": "docker push gcr.io/bright-union/vault-3"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@nktkas/hyperliquid": "^0.25.0",
+    "@prisma/adapter-pg": "^7.3.0",
+    "@types/pg": "^8.16.0",
+    "axios": "1.8.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "moment": "^2.29.1",
+    "node-schedule": "^2.1.1",
+    "openai": "^5.20.0",
+    "pg": "^8.17.2",
+    "taapi": "^1.4.8",
+    "viem": "^2.29.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.26.0",
+    "@babel/preset-env": "^7.26.0",
+    "@babel/preset-typescript": "^7.26.0",
+    "@prisma/client": "^7.3.0",
+    "@types/axios": "^0.14.4",
+    "@types/bignumber.js": "^5.0.4",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.5",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.9",
+    "prisma": "^7.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}

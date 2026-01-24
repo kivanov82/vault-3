@@ -1,0 +1,143 @@
+// Prisma schema for Vault-3 Phase 1 Copytrading
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Raw fills from Hyperliquid (for TWAP detection)
+model Fill {
+  id              String   @id @default(uuid())
+  fillId          String   @unique  // Hyperliquid fill ID
+  timestamp       DateTime
+  traderAddress   String
+  symbol          String
+  side            String   // 'B' or 'A' (buy/sell)
+  price           Float
+  size            Float
+  positionSzi     Float    // Signed size after fill
+
+  // TWAP aggregation
+  aggregateTradeId String?
+  isFirstFill     Boolean  @default(false)
+  isLastFill      Boolean  @default(false)
+
+  // Raw data
+  rawData         Json
+
+  createdAt       DateTime @default(now())
+
+  @@index([traderAddress, timestamp])
+  @@index([symbol, timestamp])
+  @@index([aggregateTradeId])
+}
+
+// Aggregated logical trades
+model Trade {
+  id              String   @id @default(uuid())
+  timestamp       DateTime
+
+  // Trade details
+  trader          String   // 'us' | 'target'
+  traderAddress   String
+  symbol          String
+  side            String   // 'long' | 'short'
+  entryPrice      Float
+  exitPrice       Float?
+  size            Float
+  leverage        Float
+
+  // Performance
+  pnl             Float?
+  pnlPercent      Float?
+  holdTimeSeconds Int?
+
+  // Copytrading
+  isCopyTrade     Boolean  @default(false)
+  targetTradeId   String?
+  latencyMs       Int?
+  slippageBps     Float?
+
+  // TWAP
+  isTwapOrder     Boolean  @default(false)
+  fillCount       Int?
+  twapDurationSeconds Int?
+  avgEntryPrice   Float?
+  worstSlippage   Float?
+
+  // Market context
+  btcPrice        Float?
+  ethPrice        Float?
+  fundingRate     Float?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([traderAddress, timestamp])
+  @@index([symbol, timestamp])
+  @@index([trader, timestamp])
+}
+
+// Market candles
+model Candle {
+  id         String   @id @default(uuid())
+  symbol     String
+  timeframe  String   // '1m' | '5m' | '15m' | '1h' | '4h' | '1d'
+  timestamp  DateTime
+
+  open       Float
+  high       Float
+  low        Float
+  close      Float
+  volume     Float
+
+  // Technical indicators
+  rsi14      Float?
+  macd       Float?
+  macdSignal Float?
+  macdHist   Float?
+  bbUpper    Float?
+  bbMiddle   Float?
+  bbLower    Float?
+  atr14      Float?
+
+  createdAt  DateTime @default(now())
+
+  @@unique([symbol, timeframe, timestamp])
+  @@index([symbol, timeframe, timestamp])
+}
+
+// Funding rates
+model FundingRate {
+  id        String   @id @default(uuid())
+  symbol    String
+  timestamp DateTime
+  rate      Float    // Annualized percentage
+
+  createdAt DateTime @default(now())
+
+  @@unique([symbol, timestamp])
+  @@index([symbol, timestamp])
+}
+
+// Position snapshots (for tracking our vs target)
+model PositionSnapshot {
+  id              String   @id @default(uuid())
+  timestamp       DateTime
+  traderAddress   String
+  symbol          String
+
+  side            String   // 'long' | 'short' | 'none'
+  size            Float
+  leverage        Float?
+  entryPrice      Float?
+  unrealizedPnl   Float?
+
+  createdAt       DateTime @default(now())
+
+  @@index([traderAddress, timestamp])
+  @@index([symbol, timestamp])
+}
