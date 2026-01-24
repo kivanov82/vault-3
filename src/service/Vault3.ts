@@ -8,7 +8,7 @@ dotenv.config();
 
 const DISABLE_ALGO_STRATEGY = process.env.DISABLE_ALGO_STRATEGY === 'true';
 const ENABLE_COPY_TRADING = process.env.ENABLE_COPY_TRADING === 'true';
-const COPY_POLL_INTERVAL = parseInt(process.env.COPY_POLL_INTERVAL_SECONDS || '30');
+const COPY_POLL_INTERVAL = parseInt(process.env.COPY_POLL_INTERVAL_SECONDS || '600');
 
 export class Vault3 {
 

@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import * as hl from "@nktkas/hyperliquid";
-import {HyperliquidConnector, TICKERS} from "./HyperliquidConnector";
+import {HyperliquidConnector} from "./HyperliquidConnector";
 import {logger} from "../utils/logger";
 import { PrismaClient } from '@prisma/client';
 import pg from 'pg';
@@ -22,6 +22,10 @@ const prisma = new PrismaClient({ adapter });
 
 // Track last scan time for latency calculation
 const tradeStartTimes = new Map<string, number>();
+
+// Track failed orders to prevent immediate retries (symbol -> timestamp)
+const failedOrders = new Map<string, number>();
+const FAILED_ORDER_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown after failed order
 
 // WebSocket reconnection state
 let wsTransport: hl.WebSocketTransport | null = null;
@@ -67,15 +71,10 @@ export class CopyTradingManager {
     }
 
     /**
-     * Get ticker config (from TICKERS or dynamically)
+     * Get ticker config dynamically from Hyperliquid metadata
      */
     private static getTickerConfig(symbol: string, targetLeverage: number): any {
-        // First, try static config
-        if (TICKERS[symbol]) {
-            return TICKERS[symbol];
-        }
-
-        // Otherwise, build dynamic config from Hyperliquid metadata
+        // Build dynamic config from Hyperliquid metadata
         const metadata = assetMetadataCache.get(symbol);
         if (!metadata) {
             logger.warn(`⚠️  ${symbol}: No metadata found in Hyperliquid universe`);
@@ -101,6 +100,14 @@ export class CopyTradingManager {
      */
     static async scanTraders() {
         const scanStartTime = Date.now();
+
+        // Clean up expired failed order cooldowns
+        const now = Date.now();
+        for (const [symbol, failedTime] of failedOrders.entries()) {
+            if (now - failedTime > FAILED_ORDER_COOLDOWN_MS) {
+                failedOrders.delete(symbol);
+            }
+        }
 
         try {
             // Fetch asset metadata on first scan
@@ -229,6 +236,16 @@ export class CopyTradingManager {
         const { symbol, action, targetSide, ourSide, targetSizeForUs, targetLeverage } = delta;
         const isLong = targetSide === 'long';
 
+        // Check if this symbol recently failed to open
+        if (action === 'open' || action === 'flip') {
+            const lastFailedTime = failedOrders.get(symbol);
+            if (lastFailedTime && (Date.now() - lastFailedTime) < FAILED_ORDER_COOLDOWN_MS) {
+                const remainingCooldown = Math.ceil((FAILED_ORDER_COOLDOWN_MS - (Date.now() - lastFailedTime)) / 1000);
+                logger.warn(`⏸️  ${symbol}: Skipping ${action} - recent order failure (cooldown: ${remainingCooldown}s)`);
+                return;
+            }
+        }
+
         logger.info(`🔄 ${symbol}: ${action.toUpperCase()} (Target: ${targetSide} ${targetLeverage}x, Ours: ${ourSide})`);
 
         // Track trade start time for latency measurement
@@ -239,13 +256,30 @@ export class CopyTradingManager {
             const market = await HyperliquidConnector.getMarket(symbol);
             const positionValueUSD = targetSizeForUs * market;
 
-            // Only check minimum position size
+            // Check minimum position size
             if (positionValueUSD < MIN_POSITION_SIZE_USD) {
                 logger.warn(`⚠️  ${symbol}: Position size $${positionValueUSD.toFixed(2)} below minimum $${MIN_POSITION_SIZE_USD}, skipping`);
                 return;
             }
 
-            logger.info(`💰 ${symbol}: Position value $${positionValueUSD.toFixed(2)}, Leverage ${targetLeverage}x`);
+            // Check if we have enough margin for open/flip actions
+            if (action === 'open' || action === 'flip') {
+                const ourPortfolio = await HyperliquidConnector.getPortfolio(WALLET);
+                const requiredMargin = positionValueUSD / targetLeverage;
+                const requiredMarginWithBuffer = requiredMargin * 1.2; // 20% safety buffer
+
+                logger.info(`💰 ${symbol}: Position value $${positionValueUSD.toFixed(2)}, Leverage ${targetLeverage}x`);
+                logger.info(`   Required margin: $${requiredMargin.toFixed(2)} (with buffer: $${requiredMarginWithBuffer.toFixed(2)})`);
+                logger.info(`   Available margin: $${ourPortfolio.available.toFixed(2)}`);
+
+                if (requiredMarginWithBuffer > ourPortfolio.available) {
+                    logger.warn(`⚠️  ${symbol}: Insufficient margin (with 20% safety buffer)`);
+                    logger.warn(`   Need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)} available`);
+                    return;
+                }
+            } else {
+                logger.info(`💰 ${symbol}: Position value $${positionValueUSD.toFixed(2)}, Leverage ${targetLeverage}x`);
+            }
 
             // Execute the action
             switch (action) {
@@ -255,17 +289,17 @@ export class CopyTradingManager {
                     break;
 
                 case 'open':
-                    await HyperliquidConnector.openOrder(tickerConfig, isLong);
+                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage);
                     await this.logCopyTrade(symbol, 'open', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
                     break;
 
                 case 'flip':
                     // Close current position
                     await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long');
-                    // Wait a bit for close to settle
+                    // Wait for close to settle
                     await new Promise(resolve => setTimeout(resolve, 2000));
                     // Open new position
-                    await HyperliquidConnector.openOrder(tickerConfig, isLong);
+                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage);
                     await this.logCopyTrade(symbol, 'flip', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
                     break;
 
@@ -277,8 +311,25 @@ export class CopyTradingManager {
             }
 
             logger.info(`✅ ${symbol}: ${action} executed successfully`);
+
+            // Wait for portfolio balance to update on API (important for subsequent trades in same scan)
+            if (action !== 'adjust') {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                logger.info(`⏱️  ${symbol}: Waiting for balance update...`);
+            }
+
+            // Clear failed order tracking on success
+            if (action === 'open' || action === 'flip') {
+                failedOrders.delete(symbol);
+            }
         } catch (error: any) {
             logger.error(`❌ ${symbol}: ${action} failed - ${error.message}`);
+
+            // Track failed open/flip orders to prevent immediate retries
+            if (action === 'open' || action === 'flip') {
+                failedOrders.set(symbol, Date.now());
+                logger.info(`⏸️  ${symbol}: Order failure recorded - will skip for ${FAILED_ORDER_COOLDOWN_MS / 1000}s`);
+            }
         }
     }
 

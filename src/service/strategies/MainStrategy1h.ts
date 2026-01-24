@@ -4,7 +4,10 @@ import {
     REVERSAL_1H,
     RISK_1H,
 } from "./execution-config";
-import { HyperliquidConnector, TICKERS } from "../trade/HyperliquidConnector";
+import { HyperliquidConnector } from "../trade/HyperliquidConnector";
+
+// NOTE: This strategy is DISABLED (DISABLE_ALGO_STRATEGY=true)
+// TICKERS has been removed - this file needs refactoring if re-enabled
 import { logger } from "../utils/logger";
 import moment from "moment/moment";
 import dotenv from "dotenv";
@@ -158,8 +161,9 @@ export async function runMainStrategy1h(symbols: Symbol[]) {
                 const nearEntry = withinBp(lastPrice, entryPx, REVERSAL_1H.MAX_ENTRY_DRIFT_BP);
                 if (strong && nearEntry) {
                     logger.info(`[1H] REVERSAL ${symbol} ${posSide} -> ${desiredSide}, close & flip. conf=${signal.confidence} score=${score} json=${JSON.stringify(dbg)}`);
-                    await HyperliquidConnector.marketClosePosition(TICKERS[symbol], posSide === "long");
-                    await HyperliquidConnector.openOrder(TICKERS[symbol], desiredSide === "long");
+                    // TODO: Refactor to use dynamic ticker config when re-enabling this strategy
+                    // await HyperliquidConnector.marketClosePosition(TICKERS[symbol], posSide === "long");
+                    // await HyperliquidConnector.openOrder(TICKERS[symbol], desiredSide === "long");
                     continue;
                 } else {
                     // Hold existing; do not add
@@ -177,7 +181,8 @@ export async function runMainStrategy1h(symbols: Symbol[]) {
             logger.info(`[1H] OPENING ${symbol} ${desiredSide.toUpperCase()} conf=${signal.confidence} score=${score} json=${JSON.stringify(dbg)}`);
 
             // Open new position
-            await HyperliquidConnector.openOrder(TICKERS[symbol], desiredSide === "long");
+            // TODO: Refactor to use dynamic ticker config when re-enabling this strategy
+            // await HyperliquidConnector.openOrder(TICKERS[symbol], desiredSide === "long");
 
         } catch (e: any) {
             logger.error(`[1H] ${symbol} error: ${e?.message || String(e)}`);

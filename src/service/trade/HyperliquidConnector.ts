@@ -9,95 +9,7 @@ dotenv.config(); // Load environment variables
 const TRADING_WALLET = process.env.WALLET as `0x${string}`;
 const TRADING_PKEY = process.env.WALLET_PK as `0x${string}`;
 
-export const TICKERS = {
-    BTC: {
-        syn: 'BTC',
-        id: 0,
-        leverage: 40,
-        szDecimals: 5,
-    },
-    ETH: {
-        syn: 'ETH',
-        id: 1,
-        leverage: 25,
-        szDecimals: 4,
-    },
-    SOL: {
-        syn: 'SOL',
-        id: 5,
-        leverage: 20,
-        szDecimals: 2,
-    },
-    SUI: {
-        syn: 'SUI',
-        id: 14,
-        leverage: 10,
-        szDecimals: 1,
-    },
-    kPEPE: {
-        syn: 'kPEPE',
-        id: 15,
-        leverage: 10,
-        szDecimals: 0,
-    },
-    XRP: {
-        syn: 'XRP',
-        id: 25,
-        leverage: 20,
-        szDecimals: 0,
-    },
-    GOAT: {
-        syn: 'GOAT',
-        id: 149,
-        leverage: 5,
-        szDecimals: 0,
-    },
-    FARTCOIN: {
-        syn: 'FARTCOIN',
-        id: 165,
-        leverage: 5,
-        szDecimals: 1,
-    },
-    TRUMP: {
-        syn: 'TRUMP',
-        id: 174,
-        leverage: 10,
-        szDecimals: 1,
-    }
-}
-
 export class HyperliquidConnector {
-
-    static makePositionRiskNeutral(ticker, long: boolean) {
-        this.getOpenPosition(TRADING_WALLET, ticker.syn).then(position => {
-            if (position) {
-                this.getMarket(ticker.syn).then(market => {
-                    const orderInstantPrice = long ? (market * 99 / 100) : (market * 101 / 100);
-                    this.getClients().wallet.order({
-                        orders: [
-                            {
-                                a: ticker.id,
-                                b: !long,
-                                p: orderInstantPrice.toFixed(0).toString(),
-                                s: '0',
-                                r: true,   // reduce-only
-                                t: {
-                                    trigger: {
-                                        isMarket: true,
-                                        triggerPx: position.entryPx,
-                                        tpsl: "sl"
-                                    },
-                                },
-                            }
-                        ],
-                        grouping: "positionTpsl",
-                    }).catch(error => {
-                        logger.error(error)
-                    });
-                });
-            }
-        })
-    }
 
     static marketClosePosition(ticker, long: boolean, percent: number = 1) {
         return this.getOpenPosition(TRADING_WALLET, ticker.syn).then(position => {
@@ -133,6 +45,82 @@ export class HyperliquidConnector {
         });
     }
 
+    /**
+     * Open a copy position with specified size and leverage (no TP/SL)
+     * Used for copytrading where we match target vault's positions exactly
+     */
+    static async openCopyPosition(ticker: any, long: boolean, size: number, leverage: number) {
+        const position = await this.getOpenPosition(TRADING_WALLET, ticker.syn);
+        if (position) {
+            logger.info('Position already exists');
+            return;
+        }
+
+        const market = await this.getMarket(ticker.syn);
+        const priceDecimals = market < 1 ? 5 : (market < 10 ? 2 : 0);
+
+        // Set leverage first
+        logger.info(`⚙️  ${ticker.syn}: Setting leverage to ${leverage}x (asset id: ${ticker.id})`);
+        try {
+            const leverageResult = await this.getClients().wallet.updateLeverage({
+                asset: ticker.id,
+                isCross: false,
+                leverage: leverage
+            });
+            logger.info(`✅ ${ticker.syn}: Leverage set to ${leverage}x - ${JSON.stringify(leverageResult)}`);
+
+            // Wait for leverage update to propagate
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (error: any) {
+            logger.error(`❌ ${ticker.syn}: Failed to set leverage - ${error.message}`);
+            throw error;
+        }
+
+        // Get actual withdrawable amount and cap size to what we can afford
+        const portfolio = await this.getPortfolio(TRADING_WALLET);
+        const maxPositionValue = portfolio.available * leverage * 0.95; // 95% of max to leave buffer
+        const targetPositionValue = size * market;
+
+        let actualSize = size;
+        if (targetPositionValue > maxPositionValue) {
+            actualSize = (maxPositionValue / market);
+            logger.warn(`⚠️  ${ticker.syn}: Capping size from ${size.toFixed(ticker.szDecimals)} to ${actualSize.toFixed(ticker.szDecimals)} (available margin: $${portfolio.available.toFixed(2)})`);
+        }
+
+        // Place market order for instant fill with 1% slippage
+        const orderInstantPrice = long ? (market * 1.01) : (market * 0.99);
+        const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();
+        const orderSizeString = actualSize.toFixed(ticker.szDecimals).toString();
+
+        logger.info(`📝 ${ticker.syn}: Submitting order - ${long ? 'BUY' : 'SELL'} ${orderSizeString} @ ${orderInstantPriceString} (market: ${market.toFixed(priceDecimals)})`);
+        logger.info(`   Position value: $${(actualSize * market).toFixed(2)} @ ${leverage}x = $${((actualSize * market) / leverage).toFixed(2)} margin`);
+
+        return this.getClients().wallet.order({
+            orders: [
+                {
+                    a: ticker.id,
+                    b: long,
+                    p: orderInstantPriceString,
+                    s: orderSizeString,
+                    r: false,   // Not reduce-only
+                    t: {
+                        limit: {
+                            tif: 'FrontendMarket'
+                        }
+                    }
+                }
+            ],
+            grouping: "na",
+        }).catch(error => {
+            logger.error(error);
+            throw error;
+        });
+    }
+
+    /**
+     * Legacy method for algorithmic strategy (uses TP/SL)
+     * Not used for copytrading
+     */
     static openOrder(ticker, long: boolean) {
         return this.getOpenPosition(TRADING_WALLET, ticker.syn).then((position) => {
             if (position) {
@@ -260,44 +248,12 @@ export class HyperliquidConnector {
     }
 
     static getPortfolio(trader: `0x${string}`) {
-        return this.getClients().public.portfolio({user: trader}).then(portfolio => {
-            const lastInHistory = portfolio[0][1].accountValueHistory.length - 1;
-            const currentBalanceUSDC = portfolio[0][1].accountValueHistory[lastInHistory][1];
-            return this.getOpenPositions(trader).then((positions) => {
-                const balanceInPositions = positions.assetPositions.reduce((acc, position) => {
-                    return Number(position.position.positionValue) / position.position.leverage.value + acc;
-                }, 0);
-                return {
-                    portfolio: Number(currentBalanceUSDC),
-                    available: Number(currentBalanceUSDC) - balanceInPositions
-                } ;
-            });
-        })
-    }
-
-    static async considerTakingProfit(tradingPosition: {
-        coin: any;
-        szi?: string;
-        leverage?: { type: "isolated"; value: number; rawUsd: string; } | { type: "cross"; value: number; };
-        entryPx?: string;
-        positionValue?: string;
-        unrealizedPnl: any;
-        returnOnEquity?: string;
-        liquidationPx?: string;
-        marginUsed: any;
-        maxLeverage?: number;
-        cumFunding?: { allTime: string; sinceOpen: string; sinceChange: string; };
-    }) {
-        const unrealizedPnl = tradingPosition.unrealizedPnl;
-        const currentValue = tradingPosition.marginUsed;
-        const totalPortfolio = (await this.getPortfolio(TRADING_WALLET)).portfolio;
-        if (Number(unrealizedPnl) > 0 &&
-            Number(unrealizedPnl) / Number(currentValue) > 0.75 /*75% gain*/ &&
-            Number(currentValue) / Number(totalPortfolio) > 0.15 /*15% of portfolio*/) {
-            logger.info(`TRADING: taking profit on ${tradingPosition.coin} position`);
-            await this.marketClosePosition(TICKERS[tradingPosition.coin],
-                this.positionSide(tradingPosition) === 'long', 0.3);
-        }
+        return this.getClients().public.clearinghouseState({user: trader}).then(state => {
+            return {
+                portfolio: Number(state.marginSummary.accountValue),
+                available: Number(state.withdrawable)  // Use Hyperliquid's actual withdrawable amount
+            };
+        });
     }
 
     static positionSide(position) {
@@ -316,7 +272,12 @@ export class HyperliquidConnector {
             }
         });
         const viemAccount = privateKeyToAccount(TRADING_PKEY);
-        const viemClient = new hl.ExchangeClient({wallet: viemAccount, transport});
+        // Trade on behalf of the vault (WALLET is the vault address)
+        const viemClient = new hl.ExchangeClient({
+            wallet: viemAccount,
+            transport,
+            defaultVaultAddress: TRADING_WALLET  // Specify we're trading for the vault
+        });
         const client = new hl.InfoClient({transport});
         return {
             public: client,
