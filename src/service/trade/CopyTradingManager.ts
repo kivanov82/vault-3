@@ -208,10 +208,8 @@ export class CopyTradingManager {
             if (sizeDiff > sizeThreshold) {
                 positionDelta.needsAction = true;
                 positionDelta.action = 'adjust';
-            } else {
-                // Positions match, check for take profit
-                await HyperliquidConnector.considerTakingProfit(ourPosition);
             }
+            // else: Positions match within threshold - do nothing, stay synced with target
         }
 
         // Execute action if needed
