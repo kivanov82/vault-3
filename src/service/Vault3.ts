@@ -1,6 +1,7 @@
 import schedule from "node-schedule";
 import {runMainStrategy1h, subscribeToEvents} from "./strategies/MainStrategy1h";
 import {CopyTradingManager} from "./trade/CopyTradingManager";
+import {StartupSync} from "./data/StartupSync";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -19,6 +20,9 @@ export class Vault3 {
         // Phase 1: Copytrading (ENABLED)
         if (ENABLE_COPY_TRADING) {
             console.log(`   Copy Poll Interval: ${COPY_POLL_INTERVAL}s\n`);
+
+            // Sync recent fills on startup to ensure database is up to date
+            await StartupSync.syncRecentFills();
 
             // Position-based polling every 30 seconds
             schedule.scheduleJob(`*/${COPY_POLL_INTERVAL} * * * * *`, () => {

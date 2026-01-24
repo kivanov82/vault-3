@@ -107,6 +107,17 @@ npm start
 
 ## How It Works
 
+### Startup Sync
+
+**On every startup**, the bot ensures database integrity:
+
+1. **Fetches last 2,000 fills** from Hyperliquid API
+2. **Compares with database** - finds any missing fills
+3. **Imports missing fills** - ensures 100% data completeness
+4. **Aggregates new fills** into logical trades (TWAP detection)
+
+This guarantees you never miss fills due to downtime, WebSocket disconnects, or database issues.
+
 ### Position-Based Copytrading
 
 Every 10 minutes (configurable), the bot:
@@ -195,6 +206,12 @@ Real-time WebSocket connection for data collection:
    Algo Strategy: ❌ DISABLED
    Copy Trading: ✅ ENABLED
    Copy Poll Interval: 600s
+
+🔄 Starting startup sync...
+📅 Latest fill in DB: 2026-01-23T14:23:45.000Z
+📡 Fetching recent fills from Hyperliquid API...
+📦 Fetched 2000 fills from API
+✅ Database is up to date - no missing fills
 
 ✅ Copytrading system started
 🔌 COPY TRADING: WebSocket connected

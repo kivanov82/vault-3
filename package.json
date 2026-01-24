@@ -13,7 +13,7 @@
     "docker-tag": "docker tag vault-3 gcr.io/bright-union/vault-3",
     "gcloud-auth": "gcloud auth login",
     "docker-push": "docker push gcr.io/bright-union/vault-3"
-  },
+  },Ï
   "author": "",
   "license": "ISC",
   "dependencies": {

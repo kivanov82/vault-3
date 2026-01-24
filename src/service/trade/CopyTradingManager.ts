@@ -31,7 +31,69 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 let healthCheckTimer: NodeJS.Timeout | null = null;
 const MAX_RECONNECT_DELAY = 60000; // 1 minute max
 
+// Asset metadata cache (fetched from Hyperliquid)
+const assetMetadataCache = new Map<string, any>();
+let assetMetadataFetched = false;
+
 export class CopyTradingManager {
+
+    /**
+     * Fetch asset metadata from Hyperliquid (one-time on first scan)
+     */
+    private static async fetchAssetMetadata(): Promise<void> {
+        if (assetMetadataFetched) return;
+
+        try {
+            const transport = new hl.HttpTransport();
+            const info = new hl.InfoClient({ transport });
+            const meta = await info.meta();
+
+            // Cache all asset metadata with index (used as asset ID)
+            meta.universe.forEach((asset, index) => {
+                assetMetadataCache.set(asset.name, {
+                    name: asset.name,
+                    id: index, // Asset ID is the index in the universe array
+                    szDecimals: asset.szDecimals,
+                    maxLeverage: asset.maxLeverage,
+                    onlyIsolated: asset.onlyIsolated,
+                });
+            });
+
+            assetMetadataFetched = true;
+            logger.info(`✅ Cached metadata for ${assetMetadataCache.size} assets`);
+        } catch (error: any) {
+            logger.error(`Failed to fetch asset metadata: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get ticker config (from TICKERS or dynamically)
+     */
+    private static getTickerConfig(symbol: string, targetLeverage: number): any {
+        // First, try static config
+        if (TICKERS[symbol]) {
+            return TICKERS[symbol];
+        }
+
+        // Otherwise, build dynamic config from Hyperliquid metadata
+        const metadata = assetMetadataCache.get(symbol);
+        if (!metadata) {
+            logger.warn(`⚠️  ${symbol}: No metadata found in Hyperliquid universe`);
+            return null;
+        }
+
+        // Build dynamic config
+        const config = {
+            syn: symbol,
+            id: metadata.id,
+            leverage: Math.min(targetLeverage, metadata.maxLeverage), // Use target's leverage, capped at max
+            szDecimals: metadata.szDecimals,
+        };
+
+        logger.info(`📋 ${symbol}: Using dynamic config (id: ${config.id}, leverage: ${config.leverage}x, decimals: ${config.szDecimals})`);
+
+        return config;
+    }
 
     /**
      * Position-based scanning - polls every 30 seconds to sync positions
@@ -41,6 +103,9 @@ export class CopyTradingManager {
         const scanStartTime = Date.now();
 
         try {
+            // Fetch asset metadata on first scan
+            await this.fetchAssetMetadata();
+
             // Get both vault portfolios to calculate scaling factor
             const [targetPortfolio, ourPortfolio, targetPositions] = await Promise.all([
                 HyperliquidConnector.getPortfolio(COPY_TRADER),
@@ -87,15 +152,6 @@ export class CopyTradingManager {
      * Sync a single position with the target vault
      */
     private static async syncPosition(ticker: string, scaleFactor: number, scanStartTime: number) {
-        // Check if ticker is in our config, if not, log warning but continue
-        const tickerConfig = TICKERS[ticker];
-        if (!tickerConfig) {
-            logger.warn(`⚠️  ${ticker}: Not in TICKERS config - will use dynamic config`);
-            // We'll need to fetch ticker metadata from Hyperliquid
-            // For now, skip unsupported tickers
-            return;
-        }
-
         // Get positions from both vaults
         const [targetPosition, ourPosition] = await Promise.all([
             HyperliquidConnector.getOpenPosition(COPY_TRADER, ticker),
@@ -107,6 +163,13 @@ export class CopyTradingManager {
         const targetSize = targetPosition ? Math.abs(Number(targetPosition.szi)) : 0;
         const ourSize = ourPosition ? Math.abs(Number(ourPosition.szi)) : 0;
         const targetLeverage = targetPosition?.leverage?.value || 1;
+
+        // Get ticker config (static or dynamic)
+        const tickerConfig = this.getTickerConfig(ticker, targetLeverage);
+        if (!tickerConfig) {
+            logger.warn(`⚠️  ${ticker}: No config available, skipping`);
+            return;
+        }
 
         // Calculate target size for us (scaled)
         const targetSizeForUs = targetSize * scaleFactor;
