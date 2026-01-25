@@ -120,7 +120,7 @@ export class HyperliquidConnector {
         return Promise.race([
             this.getClients().public.clearinghouseState({user: trader}),
             new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('getOpenPositions timeout')), 10000)
+                setTimeout(() => reject(new Error('getOpenPositions timeout')), 20000) // 20s for batch fetch
             )
         ]);
     }
@@ -176,7 +176,7 @@ export class HyperliquidConnector {
                 };
             }),
             new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('getPortfolio timeout')), 10000)
+                setTimeout(() => reject(new Error('getPortfolio timeout')), 20000) // 20s for batch fetch
             )
         ]);
     }

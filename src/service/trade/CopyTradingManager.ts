@@ -171,9 +171,10 @@ export class CopyTradingManager {
             logger.info(scanSummary);
 
             // Process each symbol with timeout protection
+            // Pass the already-fetched positions to avoid redundant API calls
             const syncPromises = allSymbols.map(symbol =>
                 Promise.race([
-                    this.syncPosition(symbol, scaleFactor, scanStartTime),
+                    this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, ourPositions),
                     new Promise((_, reject) =>
                         setTimeout(() => reject(new Error('Sync timeout')), 30000) // 30 second timeout per symbol
                     )
@@ -196,12 +197,18 @@ export class CopyTradingManager {
     /**
      * Sync a single position with the target vault
      */
-    private static async syncPosition(ticker: string, scaleFactor: number, scanStartTime: number) {
-        // Get positions from both vaults
-        const [targetPosition, ourPosition] = await Promise.all([
-            HyperliquidConnector.getOpenPosition(COPY_TRADER, ticker),
-            HyperliquidConnector.getOpenPosition(WALLET, ticker),
-        ]);
+    private static async syncPosition(
+        ticker: string,
+        scaleFactor: number,
+        scanStartTime: number,
+        targetPositions: any,
+        ourPositions: any
+    ) {
+        // Extract positions from already-fetched data (no additional API calls)
+        const targetPosition = targetPositions.assetPositions
+            .find((ap: any) => ap.position.coin === ticker)?.position;
+        const ourPosition = ourPositions.assetPositions
+            .find((ap: any) => ap.position.coin === ticker)?.position;
 
         const targetSide = targetPosition ? HyperliquidConnector.positionSide(targetPosition) : 'none';
         const ourSide = ourPosition ? HyperliquidConnector.positionSide(ourPosition) : 'none';
