@@ -95,7 +95,7 @@ export class CopyTradingManager {
     }
 
     /**
-     * Position-based scanning - polls every 30 seconds to sync positions
+     * Position-based scanning - polls every N minutes to sync positions
      * This is resilient to TWAP orders since we compare final states, not individual fills
      */
     static async scanTraders() {
@@ -106,6 +106,22 @@ export class CopyTradingManager {
         for (const [symbol, failedTime] of failedOrders.entries()) {
             if (now - failedTime > FAILED_ORDER_COOLDOWN_MS) {
                 failedOrders.delete(symbol);
+            }
+        }
+
+        try {
+            // Test database connection health
+            await prisma.$queryRaw`SELECT 1`;
+        } catch (dbError: any) {
+            logger.error(`❌ Database connection check failed: ${dbError.message}`);
+            // Try to reconnect
+            try {
+                await prisma.$disconnect();
+                await prisma.$connect();
+                logger.info(`✅ Database reconnected`);
+            } catch (reconnectError: any) {
+                logger.error(`❌ Database reconnection failed: ${reconnectError.message}`);
+                return; // Skip this scan if DB is unavailable
             }
         }
 
@@ -255,10 +271,20 @@ export class CopyTradingManager {
         try {
             const market = await HyperliquidConnector.getMarket(symbol);
             const positionValueUSD = targetSizeForUs * market;
+            const marginRequired = positionValueUSD / targetLeverage;
 
-            // Check minimum position size
-            if (positionValueUSD < MIN_POSITION_SIZE_USD) {
-                logger.warn(`⚠️  ${symbol}: Position size $${positionValueUSD.toFixed(2)} below minimum $${MIN_POSITION_SIZE_USD}, skipping`);
+            // Check minimum requirements:
+            // 1. Margin must be >= $5 (our minimum)
+            // 2. Position value must be >= $10 (exchange minimum)
+            const EXCHANGE_MIN_POSITION_VALUE = 10;
+
+            if (marginRequired < MIN_POSITION_SIZE_USD) {
+                logger.warn(`⚠️  ${symbol}: Margin required $${marginRequired.toFixed(2)} below minimum $${MIN_POSITION_SIZE_USD}, skipping`);
+                return;
+            }
+
+            if (positionValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
+                logger.warn(`⚠️  ${symbol}: Position value $${positionValueUSD.toFixed(2)} below exchange minimum $${EXCHANGE_MIN_POSITION_VALUE}, skipping`);
                 return;
             }
 

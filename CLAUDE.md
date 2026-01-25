@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
 **Project Status:** Phase 1 Operational
-**Last Updated:** 2026-01-24
+**Last Updated:** 2026-01-25
 
 ---
 
@@ -17,7 +17,9 @@
 - **Historical Data:** 67 days (Nov 17, 2025 - Jan 23, 2026)
 - **Copy Strategy:** Position-based with scaled sizing
 - **Leverage:** Exact 1:1 match with target
-- **Infrastructure:** Google Cloud SQL (PostgreSQL)
+- **Scan Interval:** 5 minutes (configurable)
+- **Slippage:** 1% for market orders
+- **Infrastructure:** Google Cloud Run + Cloud SQL (PostgreSQL)
 
 ---
 
@@ -25,23 +27,29 @@
 
 ### Position-Based Copytrading
 
-**Core Logic** (every 10 minutes):
+**Core Logic** (every 5 minutes):
 
-1. Fetch all positions from target vault and our vault
-2. Calculate scale factor: `ourVaultSize / targetVaultSize`
-3. For each symbol:
+1. Check database connection health (auto-reconnect if needed)
+2. Fetch all positions from target vault and our vault
+3. Calculate scale factor: `ourVaultSize / targetVaultSize`
+4. For each symbol:
    - Compare target position vs. our position
    - Determine action: OPEN, CLOSE, FLIP, or ADJUST
-   - Apply risk checks (min position size only)
-   - Execute trade with exact leverage matching
+   - Apply risk checks:
+     * Minimum margin: $5 USD
+     * Minimum position value: $10 USD (exchange requirement)
+   - Execute trade with exact leverage matching (1% slippage)
    - Log to database with latency tracking
 
 **Key Features:**
 
 - **Auto-discovery**: Scans all positions automatically (no manual ticker lists)
+- **Dynamic ticker support**: Fetches asset metadata from Hyperliquid API (no hardcoded TICKERS)
 - **TWAP-resilient**: Compares position states, not individual fills
 - **Scaled sizing**: Proportional to vault size ratio
 - **No artificial limits**: Matches target's leverage and position sizes exactly
+- **Robust error handling**: Global error handlers prevent scheduler crashes
+- **Database health checks**: Auto-reconnect on connection failures
 - **Comprehensive logging**: Every trade logged with latency, leverage, P&L
 
 ### TWAP Detection
@@ -190,14 +198,16 @@ Top 10 Assets Traded:
 
 ```
 src/
-├── index.ts                              # Express server
+├── index.ts                              # Express server + global error handlers
 ├── service/
-│   ├── Vault3.ts                         # Orchestrator (position polling + WebSocket)
+│   ├── Vault3.ts                         # Orchestrator (position polling scheduler)
 │   ├── trade/
 │   │   ├── CopyTradingManager.ts         # Position-based syncing + WebSocket
 │   │   └── HyperliquidConnector.ts       # Exchange API integration
+│   ├── data/
+│   │   └── StartupSync.ts                # Startup fill synchronization
 │   ├── strategies/
-│   │   ├── MainStrategy1h.ts             # [DISABLED] Legacy algo strategy
+│   │   ├── MainStrategy1h.ts.legacy      # [REMOVED] Legacy algo strategy
 │   │   └── execution-config.ts           # Configuration
 │   └── utils/
 │       ├── logger.ts                     # Logging
@@ -219,23 +229,28 @@ src/
 # Copytrading
 COPY_TRADER=0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3
 COPY_MODE=scaled
-COPY_POLL_INTERVAL_SECONDS=600      # 10 minutes
+COPY_POLL_INTERVAL_MINUTES=5        # 5 minutes (default)
 
 # Phase Control
-DISABLE_ALGO_STRATEGY=true          # ✅ Algo disabled
 ENABLE_COPY_TRADING=true            # ✅ Copytrading enabled
 
 # Risk Management
-MIN_POSITION_SIZE_USD=5             # Only limit
+MIN_POSITION_SIZE_USD=5             # Minimum margin required ($5)
+                                    # Note: Exchange also enforces $10 min position value
 
 # Database
-DATABASE_URL=postgresql://user:pass@host:5432/vault3
+# For Cloud Run (Unix socket):
+DATABASE_URL=postgresql://vault3user:pass@/vault3?host=/cloudsql/PROJECT:REGION:INSTANCE
+# For local development (public IP):
+DATABASE_URL=postgresql://vault3user:pass@IP:5432/vault3?sslmode=no-verify
 ```
 
 **Removed Limits** (exact replication):
 - ~~COPY_TICKERS~~ - Auto-discovers all positions
+- ~~TICKERS~~ - Dynamic asset metadata from Hyperliquid API
 - ~~MAX_LEVERAGE~~ - Matches target exactly
 - ~~MAX_POSITION_PERCENT~~ - No position size limits
+- ~~DISABLE_ALGO_STRATEGY~~ - Legacy algo strategy removed
 
 ---
 
@@ -245,18 +260,22 @@ DATABASE_URL=postgresql://user:pass@host:5432/vault3
 
 ```
 🚀 Vault-3 Initializing...
-   Algo Strategy: ❌ DISABLED
    Copy Trading: ✅ ENABLED
-   Copy Poll Interval: 600s
+   Copy Poll Interval: 5 minutes
 
+🔄 Starting startup sync...
+✅ Startup sync complete
+🔄 Running initial position scan...
+📊 Copy Trading Scan (Scale: 12.5%)
 ✅ Copytrading system started
 🔌 COPY TRADING: WebSocket connected
 👀 Watching target vault: 0x4cb5...
 ```
 
-### Position Scan (Every 10 minutes)
+### Position Scan (Every 5 minutes)
 
 ```
+⏰ [2026-01-25T10:00:00.000Z] Running scheduled position scan...
 📊 Copy Trading Scan (Scale: 12.5%)
 🔍 Checking 8 symbols (7 target, 3 ours)
 ```
@@ -265,7 +284,10 @@ DATABASE_URL=postgresql://user:pass@host:5432/vault3
 
 ```
 🔄 BTC: OPEN (Target: long 40x, Ours: none)
+📋 BTC: Using dynamic config (id: 0, leverage: 40x, decimals: 5)
 💰 BTC: Position value $1,234.56, Leverage 40x
+📝 BTC: Submitting order - BUY 0.03000 @ 41234.56 (market: 40825.00)
+   Position value: $1,224.75 @ 40x = $30.62 margin
 ✅ BTC: open executed successfully
 💾 BTC: Trade logged (latency: 1245ms, leverage: 40x)
 ```
@@ -308,15 +330,19 @@ npm run docker-push
 
 ### Built-in Safeguards
 
-- Minimum position size: $5 USD (avoid dust)
-- Position scaling: Proportional to vault size ratio
-- Leverage matching: Exact replication (no artificial limits)
-- TWAP resilience: Position-based syncing (not fill-based)
+- **Minimum margin:** $5 USD (configurable)
+- **Minimum position value:** $10 USD (exchange requirement)
+- **Position scaling:** Proportional to vault size ratio
+- **Leverage matching:** Exact replication (no artificial limits)
+- **TWAP resilience:** Position-based syncing (not fill-based)
+- **Database health:** Auto-reconnect on connection failures
+- **Error recovery:** Global handlers prevent scheduler crashes
+- **Slippage control:** 1% for market orders
 
 ### Manual Controls
 
-- `MIN_POSITION_SIZE_USD` - Increase to avoid small positions
-- `COPY_POLL_INTERVAL_SECONDS` - Increase for slower response
+- `MIN_POSITION_SIZE_USD` - Increase to avoid small positions (default: $5)
+- `COPY_POLL_INTERVAL_MINUTES` - Adjust scan frequency (default: 5 minutes)
 - `ENABLE_COPY_TRADING=false` - Emergency stop
 
 ---
@@ -343,6 +369,18 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-01-25 - Production Hardening
+
+- ✅ Removed hardcoded TICKERS (dynamic asset metadata)
+- ✅ Fixed Cloud SQL connection for Cloud Run (Unix socket)
+- ✅ Fixed minimum position checks (margin vs. position value)
+- ✅ Reduced slippage to 1% (from 3%)
+- ✅ Changed scan interval to 5 minutes (from 10 minutes)
+- ✅ Added global error handlers to prevent crashes
+- ✅ Added database health checks with auto-reconnect
+- ✅ Removed legacy algo strategy code
+- ✅ Deployed to Google Cloud Run
 
 ### 2026-01-24 - Phase 1 Launch
 

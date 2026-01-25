@@ -5,6 +5,24 @@ const app = express();
 const cors = require('cors');
 const port = process.env.PORT || 3000;
 
+// Global error handlers to prevent process crashes
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🚨 Unhandled Promise Rejection:', reason);
+    console.error('Promise:', promise);
+    // Don't exit - keep the scheduler running
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('🚨 Uncaught Exception:', error);
+    // Don't exit - keep the scheduler running
+});
+
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('👋 SIGTERM received, shutting down gracefully...');
+    process.exit(0);
+});
+
 app.use(express.json())                   //Express
     .use(cors())                            //CORS enabled
     //BigInt  serializer
