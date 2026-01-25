@@ -15,6 +15,9 @@ const COPY_MODE = process.env.COPY_MODE || 'scaled';
 // Minimal risk limit
 const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5');
 
+// Position adjustment threshold (e.g., 0.1 = 10% difference triggers rebalance)
+const POSITION_ADJUST_THRESHOLD = parseFloat(process.env.POSITION_ADJUST_THRESHOLD || '0.1');
+
 // Database with connection pool limits
 const pool = new pg.Pool({
     connectionString: process.env.DATABASE_URL,
@@ -261,7 +264,7 @@ export class CopyTradingManager {
         } else if (targetSide !== 'none' && ourSide !== 'none' && targetSide === ourSide) {
             // Same direction, check if size adjustment needed
             const sizeDiff = Math.abs(ourSize - targetSizeForUs);
-            const sizeThreshold = targetSizeForUs * 0.1; // 10% tolerance
+            const sizeThreshold = targetSizeForUs * POSITION_ADJUST_THRESHOLD;
 
             if (sizeDiff > sizeThreshold) {
                 positionDelta.needsAction = true;
@@ -284,7 +287,7 @@ export class CopyTradingManager {
         tickerConfig: any,
         scanStartTime: number
     ) {
-        const { symbol, action, targetSide, ourSide, targetSizeForUs, targetLeverage } = delta;
+        const { symbol, action, targetSide, ourSide, targetSizeForUs, ourSize, targetLeverage } = delta;
         const isLong = targetSide === 'long';
 
         // Check if this symbol recently failed to open
@@ -361,9 +364,26 @@ export class CopyTradingManager {
                     break;
 
                 case 'adjust':
-                    // For now, we don't adjust position sizes (too risky with partial closes/adds)
-                    // In Phase 2, we can implement incremental adjustments
-                    logger.info(`ℹ️  ${symbol}: Size adjustment skipped (Phase 2 feature)`);
+                    // Adjust position size to match target allocation
+                    const sizeDelta = targetSizeForUs - ourSize;
+                    const sizePercent = (sizeDelta / ourSize) * 100;
+
+                    if (sizeDelta > 0) {
+                        // Need to INCREASE position size (add more)
+                        logger.info(`📈 ${symbol}: Increasing position by ${Math.abs(sizePercent).toFixed(1)}% (${ourSize.toFixed(4)} → ${targetSizeForUs.toFixed(4)})`);
+
+                        // Open additional position with same leverage
+                        await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage);
+                        await this.logCopyTrade(symbol, 'increase', targetSide, sizeDelta, market, targetLeverage, scanStartTime);
+                    } else {
+                        // Need to DECREASE position size (partial close)
+                        const reducePercent = Math.abs(sizeDelta) / ourSize; // Fraction to close (0-1)
+                        logger.info(`📉 ${symbol}: Decreasing position by ${Math.abs(sizePercent).toFixed(1)}% (${ourSize.toFixed(4)} → ${targetSizeForUs.toFixed(4)})`);
+
+                        // Partial close using marketClosePosition
+                        await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', reducePercent);
+                        await this.logCopyTrade(symbol, 'decrease', targetSide, Math.abs(sizeDelta), market, targetLeverage, scanStartTime);
+                    }
                     break;
             }
 
