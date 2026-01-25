@@ -1,7 +1,6 @@
 import * as hl from "@nktkas/hyperliquid";
 import {privateKeyToAccount} from "viem/accounts";
 import dotenv from "dotenv";
-import {singleOrderSize, takeProfitSize, TP_SL_PER_TICKER} from "../strategies/execution-config";
 import {logger} from "../utils/logger";
 
 dotenv.config(); // Load environment variables
@@ -116,99 +115,6 @@ export class HyperliquidConnector {
         });
     }
 
-    /**
-     * Legacy method for algorithmic strategy (uses TP/SL)
-     * Not used for copytrading
-     */
-    static openOrder(ticker, long: boolean) {
-        return this.getOpenPosition(TRADING_WALLET, ticker.syn).then((position) => {
-            if (position) {
-                logger.info('Position already exists');
-                return;
-            }
-            return this.getPortfolio(TRADING_WALLET).then(portfolio => {
-                return this.getMarket(ticker.syn).then(market => {
-                    //const priceDecimals = PERPS_MAX_DECIMALS - ticker.szDecimals - 1;
-                    const priceDecimals = market < 1 ? 5 : (market < 10 ? 2 : 0);
-                    //for instant fill
-                    const orderInstantPrice = long ? (market * 101 / 100) : (market * 99 / 100);
-                    const SL = TP_SL_PER_TICKER[ticker.syn][long? 'long' : 'short'].sl
-                    const TP = TP_SL_PER_TICKER[ticker.syn][long? 'long' : 'short'].tp
-                    const slPrice = long ?
-                        (market * (100 - (SL / ticker.leverage)) / 100) :
-                        (market * (100 + (SL / ticker.leverage)) / 100);
-                    const slInstantPrice = long ? (slPrice * 100.01 / 100) : (slPrice * 99.99 / 100);
-                    const tpPrice = long ?
-                        (market * (100 + (TP / ticker.leverage)) / 100) :
-                        (market * (100 - (TP / ticker.leverage)) / 100);
-                    const tpInstantPrice = long ? (tpPrice * 100.01 / 100) : (tpPrice * 99.99 / 100);
-                    const sizeInAsset = portfolio.available * singleOrderSize;
-                    const orderSize = (sizeInAsset * ticker.leverage)/ market;
-                    const tpOrderSize = (sizeInAsset * ticker.leverage * (takeProfitSize / 100))/ market;
-
-                    const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();
-                    const slPriceString = slPrice.toFixed(priceDecimals).toString();
-                    const slInstantPriceString = slInstantPrice.toFixed(priceDecimals).toString();
-                    const tpPriceString = tpPrice.toFixed(priceDecimals).toString();
-                    const tpInstantPriceString = tpInstantPrice.toFixed(priceDecimals).toString();
-
-                    const orderSizeString = orderSize.toFixed(ticker.szDecimals).toString();
-                    const tpOrderSizeString = tpOrderSize.toFixed(ticker.szDecimals).toString();
-
-                    return this.getClients().wallet.order({
-                        orders: [
-                            //Main order
-                            {
-                                a: ticker.id,
-                                b: long,
-                                p: orderInstantPriceString,
-                                s: orderSizeString,
-                                r: false,   // Not reduce-only
-                                t: {
-                                    limit: {
-                                        tif: 'FrontendMarket'
-                                    }
-                                }
-                            },
-                            //SL
-                            {
-                                a: ticker.id,
-                                b: !long,
-                                p: slInstantPriceString,
-                                s: orderSizeString,
-                                r: true,   // reduce-only
-                                t: {
-                                    trigger: {
-                                        isMarket: true,
-                                        triggerPx: slPriceString,
-                                        tpsl: "sl"
-                                    },
-                                },
-                            },
-                            //TP
-                            {
-                                a: ticker.id,
-                                b: !long,
-                                p: tpInstantPriceString,
-                                s: tpOrderSizeString,
-                                r: true,   // reduce-only
-                                t: {
-                                    trigger: {
-                                        isMarket: true,
-                                        triggerPx: tpPriceString,
-                                        tpsl: "tp"
-                                    },
-                                },
-                            }
-                        ],
-                        grouping: "normalTpsl",
-                    }).catch(error => {
-                        logger.error(error)
-                    });
-                });
-            })
-        });
-    }
 
     static async getOpenPositions(trader: `0x${string}`) {
         return Promise.race([
