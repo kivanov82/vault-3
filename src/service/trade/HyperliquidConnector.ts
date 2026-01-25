@@ -58,15 +58,15 @@ export class HyperliquidConnector {
         const market = await this.getMarket(ticker.syn);
         const priceDecimals = market < 1 ? 5 : (market < 10 ? 2 : 0);
 
-        // Set leverage first
-        logger.info(`⚙️  ${ticker.syn}: Setting leverage to ${leverage}x (asset id: ${ticker.id})`);
+        // Set leverage first (Cross margin mode)
+        logger.info(`⚙️  ${ticker.syn}: Setting leverage to ${leverage}x Cross (asset id: ${ticker.id})`);
         try {
             const leverageResult = await this.getClients().wallet.updateLeverage({
                 asset: ticker.id,
-                isCross: false,
+                isCross: true,
                 leverage: leverage
             });
-            logger.info(`✅ ${ticker.syn}: Leverage set to ${leverage}x - ${JSON.stringify(leverageResult)}`);
+            logger.info(`✅ ${ticker.syn}: Leverage set to ${leverage}x Cross - ${JSON.stringify(leverageResult)}`);
 
             // Wait for leverage update to propagate
             await new Promise(resolve => setTimeout(resolve, 1000));
