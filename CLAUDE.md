@@ -206,12 +206,8 @@ src/
 │   │   └── HyperliquidConnector.ts       # Exchange API integration
 │   ├── data/
 │   │   └── StartupSync.ts                # Startup fill synchronization
-│   ├── strategies/
-│   │   ├── MainStrategy1h.ts.legacy      # [REMOVED] Legacy algo strategy
-│   │   └── execution-config.ts           # Configuration
 │   └── utils/
-│       ├── logger.ts                     # Logging
-│       └── smart-signal.ts               # Technical indicators
+│       └── logger.ts                     # Logging
 ├── prisma/
 │   └── schema.prisma                     # Database schema
 └── scripts/
