@@ -41,15 +41,23 @@
    - Execute trade with exact leverage matching (1% slippage)
    - Log to database with latency tracking
 
+**Position Actions:**
+- **OPEN**: Target has position, we don't → Open new position
+- **CLOSE**: Target closed, we still have position → Close position
+- **FLIP**: Target changed direction (long↔short) → Close + Open opposite
+- **ADJUST**: Same direction but size differs >10% → Increase or decrease position size
+
 **Key Features:**
 
 - **Auto-discovery**: Scans all positions automatically (no manual ticker lists)
 - **Dynamic ticker support**: Fetches asset metadata from Hyperliquid API (no hardcoded TICKERS)
 - **TWAP-resilient**: Compares position states, not individual fills
 - **Scaled sizing**: Proportional to vault size ratio
+- **Position rebalancing**: Automatically adjusts position sizes to match target allocation (±10% threshold)
 - **No artificial limits**: Matches target's leverage and position sizes exactly
 - **Robust error handling**: Global error handlers prevent scheduler crashes
 - **Database health checks**: Auto-reconnect on connection failures
+- **HTTP client singleton**: Reuses connections to prevent resource leaks
 - **Comprehensive logging**: Every trade logged with latency, leverage, P&L
 
 ### TWAP Detection
@@ -233,6 +241,7 @@ ENABLE_COPY_TRADING=true            # ✅ Copytrading enabled
 # Risk Management
 MIN_POSITION_SIZE_USD=5             # Minimum margin required ($5)
                                     # Note: Exchange also enforces $10 min position value
+POSITION_ADJUST_THRESHOLD=0.1       # Rebalance if position differs by >10% (0.1 = 10%)
 
 # Database
 # For Cloud Run (Unix socket):
@@ -366,7 +375,15 @@ npm run docker-push
 
 ## Changelog
 
-### 2026-01-25 - Production Hardening
+### 2026-01-25 - Position Rebalancing & Production Hardening
+
+- ✅ Implemented position size rebalancing (increase AND decrease)
+- ✅ Configurable adjustment threshold (default 10%)
+- ✅ Fixed critical resource leaks (HTTP client singleton pattern)
+- ✅ Fixed WebSocket event listener leak
+- ✅ Added database connection pool configuration
+
+### 2026-01-25 - API Optimization & Bug Fixes
 
 - ✅ Removed hardcoded TICKERS (dynamic asset metadata)
 - ✅ Fixed Cloud SQL connection for Cloud Run (Unix socket)
