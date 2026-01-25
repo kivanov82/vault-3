@@ -9,6 +9,11 @@ const TRADING_WALLET = process.env.WALLET as `0x${string}`;
 const TRADING_PKEY = process.env.WALLET_PK as `0x${string}`;
 
 export class HyperliquidConnector {
+    // Singleton clients - reuse instead of creating new ones on each call
+    private static clientsInstance: {
+        public: hl.InfoClient;
+        wallet: hl.ExchangeClient<any>;
+    } | null = null;
 
     static marketClosePosition(ticker, long: boolean, percent: number = 1) {
         return this.getOpenPosition(TRADING_WALLET, ticker.syn).then(position => {
@@ -186,28 +191,34 @@ export class HyperliquidConnector {
     }
 
     static getClients() {
+        // Return cached clients if they exist (singleton pattern)
+        if (this.clientsInstance) {
+            return this.clientsInstance;
+        }
+
+        // Create new clients only once
         const transport = new hl.HttpTransport({
             timeout: null,
-            //server: "api2"
             server: {
                 mainnet: {
-                    //rpc: 'https://rpc.hypurrscan.io',
                     rpc: 'https://rpc.hyperlend.finance',
                 }
             }
         });
         const viemAccount = privateKeyToAccount(TRADING_PKEY);
-        // Trade on behalf of the vault (WALLET is the vault address)
         const viemClient = new hl.ExchangeClient({
             wallet: viemAccount,
             transport,
-            defaultVaultAddress: TRADING_WALLET  // Specify we're trading for the vault
+            defaultVaultAddress: TRADING_WALLET
         });
         const client = new hl.InfoClient({transport});
-        return {
+
+        this.clientsInstance = {
             public: client,
             wallet: viemClient
         };
+
+        return this.clientsInstance;
     }
 
 

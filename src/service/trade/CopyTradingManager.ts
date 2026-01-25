@@ -15,8 +15,13 @@ const COPY_MODE = process.env.COPY_MODE || 'scaled';
 // Minimal risk limit
 const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5');
 
-// Database
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+// Database with connection pool limits
+const pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 10, // Maximum connections in pool
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+});
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
@@ -33,6 +38,7 @@ let wsClient: hl.SubscriptionClient | null = null;
 let reconnectAttempts = 0;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let healthCheckTimer: NodeJS.Timeout | null = null;
+let lastWebSocketMessageTime = Date.now();
 const MAX_RECONNECT_DELAY = 60000; // 1 minute max
 
 // Asset metadata cache (fetched from Hyperliquid)
@@ -456,10 +462,16 @@ export class CopyTradingManager {
             // Connection opened
             wsTransport.socket.addEventListener("open", () => {
                 logger.info("🔌 COPY TRADING: WebSocket connected");
-                reconnectAttempts = 0; // Reset reconnect counter on successful connection
+                reconnectAttempts = 0;
+                lastWebSocketMessageTime = Date.now(); // Reset timestamp
 
                 // Start health check
                 this.startHealthCheck();
+            });
+
+            // Track all messages to update health check timestamp
+            wsTransport.socket.addEventListener("message", () => {
+                lastWebSocketMessageTime = Date.now();
             });
 
             // Connection closed
@@ -526,24 +538,15 @@ export class CopyTradingManager {
 
     /**
      * Health check - verify connection is still alive
-     * If no messages received for 60 seconds, force reconnect
+     * If no messages received for 2 minutes, force reconnect
      */
     private static startHealthCheck() {
-        let lastMessageTime = Date.now();
-
-        // Update timestamp on any message
-        if (wsTransport) {
-            wsTransport.socket.addEventListener("message", () => {
-                lastMessageTime = Date.now();
-            });
-        }
-
         // Check every 30 seconds
         healthCheckTimer = setInterval(() => {
-            const timeSinceLastMessage = Date.now() - lastMessageTime;
+            const timeSinceLastMessage = Date.now() - lastWebSocketMessageTime;
 
             if (timeSinceLastMessage > 120000) { // 2 minutes without messages
-                logger.warn(`⚠️  WebSocket health check failed (no messages for ${(timeSinceLastMessage / 1000).toFixed(0)}s)`);
+                logger.warn(`⚠️  WebSocket stale (no messages for ${(timeSinceLastMessage / 1000).toFixed(0)}s)`);
                 logger.info(`🔄 Forcing WebSocket reconnection...`);
 
                 // Force close and reconnect
@@ -555,8 +558,6 @@ export class CopyTradingManager {
                     }
                 }
                 // scheduleReconnect will be called by close event
-            } else {
-                logger.debug(`💓 WebSocket healthy (last message ${(timeSinceLastMessage / 1000).toFixed(0)}s ago)`);
             }
         }, 30000); // Check every 30 seconds
     }

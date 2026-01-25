@@ -14,11 +14,18 @@ export class Vault3 {
         console.log('\n🚀 Vault-3 Initializing...');
         console.log(`   Copy Trading: ${ENABLE_COPY_TRADING ? '✅ ENABLED' : '❌ DISABLED'}`);
 
-        // Heartbeat to ensure process is alive
+        // Heartbeat to ensure process is alive and monitor resources
         setInterval(() => {
             const uptime = Math.floor(process.uptime() / 60);
-            console.log(`💓 Heartbeat: Process alive (uptime: ${uptime}m, memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB)`);
-        }, 10 * 60 * 1000); // Every 10 minutes
+            const mem = process.memoryUsage();
+            console.log(`💓 Heartbeat: ${uptime}m uptime | Heap: ${Math.round(mem.heapUsed / 1024 / 1024)}MB / ${Math.round(mem.heapTotal / 1024 / 1024)}MB | RSS: ${Math.round(mem.rss / 1024 / 1024)}MB`);
+
+            // Force garbage collection if memory is high (if --expose-gc flag is used)
+            if (global.gc && mem.heapUsed > 200 * 1024 * 1024) {
+                console.log('🗑️  Running garbage collection (heap > 200MB)');
+                global.gc();
+            }
+        }, 5 * 60 * 1000); // Every 5 minutes
 
         if (ENABLE_COPY_TRADING) {
             console.log(`   Copy Poll Interval: ${COPY_POLL_INTERVAL_MINUTES} minutes\n`);

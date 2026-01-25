@@ -18,8 +18,24 @@ process.on('uncaughtException', (error) => {
 });
 
 // Handle graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
     console.log('👋 SIGTERM received, shutting down gracefully...');
+    try {
+        // Give ongoing operations 5 seconds to complete
+        await new Promise(resolve => setTimeout(resolve, 5000));
+    } catch (e) {
+        console.error('Error during shutdown:', e);
+    }
+    process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+    console.log('👋 SIGINT received, shutting down gracefully...');
+    try {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+    } catch (e) {
+        console.error('Error during shutdown:', e);
+    }
     process.exit(0);
 });
 
