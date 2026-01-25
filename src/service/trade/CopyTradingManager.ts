@@ -194,9 +194,12 @@ export class CopyTradingManager {
 
             await Promise.all(syncPromises);
 
-            // Log completion
+            // Log completion (only if there were actions)
             const duration = Date.now() - scanStartTime;
-            logger.info(`✅ Scan complete (${duration}ms)`);
+            const actionsCount = syncPromises.length;
+            if (actionsCount > 0) {
+                logger.info(`✅ Scan complete (${duration}ms)`);
+            }
         } catch (e: any) {
             logger.error(`❌ Scan failed: ${e.message}`);
             logger.error(e.stack);
@@ -295,13 +298,10 @@ export class CopyTradingManager {
             const lastFailedTime = failedOrders.get(symbol);
             if (lastFailedTime && (Date.now() - lastFailedTime) < FAILED_ORDER_COOLDOWN_MS) {
                 const remainingCooldown = Math.ceil((FAILED_ORDER_COOLDOWN_MS - (Date.now() - lastFailedTime)) / 1000);
-                logger.warn(`⏸️  ${symbol}: Skipping ${action} - recent order failure (cooldown: ${remainingCooldown}s)`);
+                logger.warn(`⏸️  ${symbol}: Skipping ${action} - cooldown ${remainingCooldown}s`);
                 return;
             }
         }
-
-        // Only log actions that will be executed
-        logger.info(`🔄 ${symbol}: ${action.toUpperCase()} ${targetSide} ${targetLeverage}x`);
 
         // Track trade start time for latency measurement
         const tradeKey = `${symbol}_${scanStartTime}`;
@@ -312,18 +312,16 @@ export class CopyTradingManager {
             const positionValueUSD = targetSizeForUs * market;
             const marginRequired = positionValueUSD / targetLeverage;
 
-            // Check minimum requirements:
-            // 1. Margin must be >= $5 (our minimum)
-            // 2. Position value must be >= $10 (exchange minimum)
+            // Check minimum requirements
             const EXCHANGE_MIN_POSITION_VALUE = 10;
 
             if (marginRequired < MIN_POSITION_SIZE_USD) {
-                logger.warn(`⚠️  ${symbol}: Margin required $${marginRequired.toFixed(2)} below minimum $${MIN_POSITION_SIZE_USD}, skipping`);
+                logger.warn(`⚠️  ${symbol}: Margin $${marginRequired.toFixed(2)} < $${MIN_POSITION_SIZE_USD} minimum`);
                 return;
             }
 
             if (positionValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
-                logger.warn(`⚠️  ${symbol}: Position value $${positionValueUSD.toFixed(2)} below exchange minimum $${EXCHANGE_MIN_POSITION_VALUE}, skipping`);
+                logger.warn(`⚠️  ${symbol}: Position $${positionValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum`);
                 return;
             }
 
@@ -331,10 +329,10 @@ export class CopyTradingManager {
             if (action === 'open' || action === 'flip') {
                 const ourPortfolio = await HyperliquidConnector.getPortfolio(WALLET);
                 const requiredMargin = positionValueUSD / targetLeverage;
-                const requiredMarginWithBuffer = requiredMargin * 1.2; // 20% safety buffer
+                const requiredMarginWithBuffer = requiredMargin * 1.2;
 
                 if (requiredMarginWithBuffer > ourPortfolio.available) {
-                    logger.warn(`⚠️  ${symbol}: Insufficient margin - need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)}`);
+                    logger.warn(`⚠️  ${symbol}: Need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)}`);
                     return;
                 }
             } else {
@@ -345,21 +343,21 @@ export class CopyTradingManager {
             switch (action) {
                 case 'close':
                     await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long');
+                    logger.info(`✅ ${symbol}: CLOSE ${ourSide} ${ourSize.toFixed(4)}`);
                     await this.logCopyTrade(symbol, 'close', ourSide, 0, market, targetLeverage, scanStartTime);
                     break;
 
                 case 'open':
                     await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage);
+                    logger.info(`✅ ${symbol}: OPEN ${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x`);
                     await this.logCopyTrade(symbol, 'open', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
                     break;
 
                 case 'flip':
-                    // Close current position
                     await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long');
-                    // Wait for close to settle
                     await new Promise(resolve => setTimeout(resolve, 2000));
-                    // Open new position
                     await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage);
+                    logger.info(`✅ ${symbol}: FLIP ${ourSide}→${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x`);
                     await this.logCopyTrade(symbol, 'flip', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
                     break;
 
@@ -369,30 +367,21 @@ export class CopyTradingManager {
                     const sizePercent = (sizeDelta / ourSize) * 100;
 
                     if (sizeDelta > 0) {
-                        // Need to INCREASE position size (add more)
-                        logger.info(`📈 ${symbol}: Increasing position by ${Math.abs(sizePercent).toFixed(1)}% (${ourSize.toFixed(4)} → ${targetSizeForUs.toFixed(4)})`);
-
-                        // Open additional position with same leverage (allowAddToExisting = true)
                         await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage, true);
+                        logger.info(`✅ ${symbol}: ADJUST +${Math.abs(sizePercent).toFixed(0)}% (${ourSize.toFixed(4)}→${targetSizeForUs.toFixed(4)})`);
                         await this.logCopyTrade(symbol, 'increase', targetSide, sizeDelta, market, targetLeverage, scanStartTime);
                     } else {
-                        // Need to DECREASE position size (partial close)
-                        const reducePercent = Math.abs(sizeDelta) / ourSize; // Fraction to close (0-1)
-                        logger.info(`📉 ${symbol}: Decreasing position by ${Math.abs(sizePercent).toFixed(1)}% (${ourSize.toFixed(4)} → ${targetSizeForUs.toFixed(4)})`);
-
-                        // Partial close using marketClosePosition
+                        const reducePercent = Math.abs(sizeDelta) / ourSize;
                         await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', reducePercent);
+                        logger.info(`✅ ${symbol}: ADJUST -${Math.abs(sizePercent).toFixed(0)}% (${ourSize.toFixed(4)}→${targetSizeForUs.toFixed(4)})`);
                         await this.logCopyTrade(symbol, 'decrease', targetSide, Math.abs(sizeDelta), market, targetLeverage, scanStartTime);
                     }
                     break;
             }
 
-            logger.info(`✅ ${symbol}: ${action} executed successfully`);
-
             // Wait for portfolio balance to update on API (important for subsequent trades in same scan)
             if (action !== 'adjust') {
                 await new Promise(resolve => setTimeout(resolve, 3000));
-                logger.info(`⏱️  ${symbol}: Waiting for balance update...`);
             }
 
             // Clear failed order tracking on success
@@ -440,7 +429,7 @@ export class CopyTradingManager {
                 },
             });
 
-            logger.info(`💾 ${symbol}: Trade logged (latency: ${latencyMs}ms, leverage: ${leverage}x)`);
+            // Removed verbose log - trade is already logged in execution
         } catch (error: any) {
             logger.error(`Failed to log trade for ${symbol}: ${error.message}`);
         }

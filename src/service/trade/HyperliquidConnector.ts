@@ -57,7 +57,7 @@ export class HyperliquidConnector {
     static async openCopyPosition(ticker: any, long: boolean, size: number, leverage: number, allowAddToExisting: boolean = false) {
         const position = await this.getOpenPosition(TRADING_WALLET, ticker.syn);
         if (position && !allowAddToExisting) {
-            logger.info('Position already exists');
+            // Silent return - position already exists (not an error)
             return;
         }
 
@@ -66,19 +66,16 @@ export class HyperliquidConnector {
 
         // Set leverage first (Cross margin mode) - only if opening new position or leverage changed
         if (!position || position.leverage.value !== leverage) {
-            logger.info(`⚙️  ${ticker.syn}: Setting leverage to ${leverage}x Cross (asset id: ${ticker.id})`);
             try {
-                const leverageResult = await this.getClients().wallet.updateLeverage({
+                await this.getClients().wallet.updateLeverage({
                     asset: ticker.id,
                     isCross: true,
                     leverage: leverage
                 });
-                logger.info(`✅ ${ticker.syn}: Leverage set to ${leverage}x Cross - ${JSON.stringify(leverageResult)}`);
-
                 // Wait for leverage update to propagate
                 await new Promise(resolve => setTimeout(resolve, 1000));
             } catch (error: any) {
-                logger.error(`❌ ${ticker.syn}: Failed to set leverage - ${error.message}`);
+                logger.error(`❌ ${ticker.syn}: Leverage ${leverage}x failed - ${error.message}`);
                 throw error;
             }
         }
@@ -99,7 +96,7 @@ export class HyperliquidConnector {
         const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();
         const orderSizeString = actualSize.toFixed(ticker.szDecimals).toString();
 
-        logger.info(`📝 ${ticker.syn}: ${long ? 'BUY' : 'SELL'} ${orderSizeString} @ ${orderInstantPriceString} | $${(actualSize * market).toFixed(2)} @ ${leverage}x`);
+        // Removed verbose order log - consolidated into execution result
 
         return this.getClients().wallet.order({
             orders: [
