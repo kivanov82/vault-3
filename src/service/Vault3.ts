@@ -14,6 +14,12 @@ export class Vault3 {
         console.log('\n🚀 Vault-3 Initializing...');
         console.log(`   Copy Trading: ${ENABLE_COPY_TRADING ? '✅ ENABLED' : '❌ DISABLED'}`);
 
+        // Heartbeat to ensure process is alive
+        setInterval(() => {
+            const uptime = Math.floor(process.uptime() / 60);
+            console.log(`💓 Heartbeat: Process alive (uptime: ${uptime}m, memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB)`);
+        }, 10 * 60 * 1000); // Every 10 minutes
+
         if (ENABLE_COPY_TRADING) {
             console.log(`   Copy Poll Interval: ${COPY_POLL_INTERVAL_MINUTES} minutes\n`);
 

@@ -92,8 +92,7 @@ export class HyperliquidConnector {
         const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();
         const orderSizeString = actualSize.toFixed(ticker.szDecimals).toString();
 
-        logger.info(`📝 ${ticker.syn}: Submitting order - ${long ? 'BUY' : 'SELL'} ${orderSizeString} @ ${orderInstantPriceString} (market: ${market.toFixed(priceDecimals)})`);
-        logger.info(`   Position value: $${(actualSize * market).toFixed(2)} @ ${leverage}x = $${((actualSize * market) / leverage).toFixed(2)} margin`);
+        logger.info(`📝 ${ticker.syn}: ${long ? 'BUY' : 'SELL'} ${orderSizeString} @ ${orderInstantPriceString} | $${(actualSize * market).toFixed(2)} @ ${leverage}x`);
 
         return this.getClients().wallet.order({
             orders: [
@@ -211,14 +210,24 @@ export class HyperliquidConnector {
         });
     }
 
-    static getOpenPositions(trader: `0x${string}`) {
-        return this.getClients().public.clearinghouseState({user: trader});
+    static async getOpenPositions(trader: `0x${string}`) {
+        return Promise.race([
+            this.getClients().public.clearinghouseState({user: trader}),
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('getOpenPositions timeout')), 10000)
+            )
+        ]);
     }
 
-    static getOpenPosition(trader: `0x${string}`, tickerSyn: string) {
-        return this.getClients().public.clearinghouseState({user: trader}).then(details => {
-            return details.assetPositions.find(position => position.position.coin === tickerSyn)?.position;
-        })
+    static async getOpenPosition(trader: `0x${string}`, tickerSyn: string) {
+        return Promise.race([
+            this.getClients().public.clearinghouseState({user: trader}).then(details => {
+                return details.assetPositions.find(position => position.position.coin === tickerSyn)?.position;
+            }),
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('getOpenPosition timeout')), 10000)
+            )
+        ]);
     }
 
     static getPerps() {
@@ -231,10 +240,15 @@ export class HyperliquidConnector {
         return this.getClients().public.allMids();
     }
 
-    static getMarket(ticker) {
-        return this.getClients().public.allMids().then(market => {
-            return Number(market[ticker]);
-        });
+    static async getMarket(ticker): Promise<number> {
+        return Promise.race([
+            this.getClients().public.allMids().then(market => {
+                return Number(market[ticker]);
+            }),
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('getMarket timeout')), 10000)
+            )
+        ]);
     }
 
     static candleSnapshot1h(ticker, count) {
@@ -247,13 +261,18 @@ export class HyperliquidConnector {
         });
     }
 
-    static getPortfolio(trader: `0x${string}`) {
-        return this.getClients().public.clearinghouseState({user: trader}).then(state => {
-            return {
-                portfolio: Number(state.marginSummary.accountValue),
-                available: Number(state.withdrawable)  // Use Hyperliquid's actual withdrawable amount
-            };
-        });
+    static async getPortfolio(trader: `0x${string}`): Promise<{portfolio: number, available: number}> {
+        return Promise.race([
+            this.getClients().public.clearinghouseState({user: trader}).then(state => {
+                return {
+                    portfolio: Number(state.marginSummary.accountValue),
+                    available: Number(state.withdrawable)  // Use Hyperliquid's actual withdrawable amount
+                };
+            }),
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('getPortfolio timeout')), 10000)
+            )
+        ]);
     }
 
     static positionSide(position) {

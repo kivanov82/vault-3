@@ -89,9 +89,21 @@ export class CopyTradingManager {
             szDecimals: metadata.szDecimals,
         };
 
-        logger.info(`📋 ${symbol}: Using dynamic config (id: ${config.id}, leverage: ${config.leverage}x, decimals: ${config.szDecimals})`);
+        // Only log once per symbol
+        if (!this.hasLoggedConfig(symbol)) {
+            logger.info(`📋 ${symbol}: Dynamic config (id: ${config.id}, leverage: ${config.leverage}x, decimals: ${config.szDecimals})`);
+        }
 
         return config;
+    }
+
+    private static loggedConfigs = new Set<string>();
+    private static hasLoggedConfig(symbol: string): boolean {
+        if (this.loggedConfigs.has(symbol)) {
+            return true;
+        }
+        this.loggedConfigs.add(symbol);
+        return false;
     }
 
     /**
@@ -140,8 +152,6 @@ export class CopyTradingManager {
             const scaleFactor = COPY_MODE === 'exact' ? 1.0 :
                                 (ourPortfolio.portfolio / targetPortfolio.portfolio);
 
-            logger.info(`📊 Copy Trading Scan (Scale: ${(scaleFactor * 100).toFixed(1)}%)`);
-
             // Get all symbols that target trader has positions in
             const targetSymbols = targetPositions.assetPositions
                 .filter(ap => ap.position.szi !== '0')
@@ -156,18 +166,30 @@ export class CopyTradingManager {
             // Get unique set of all symbols to check
             const allSymbols = [...new Set([...targetSymbols, ...ourSymbols])];
 
-            logger.info(`🔍 Checking ${allSymbols.length} symbols (${targetSymbols.length} target, ${ourSymbols.length} ours)`);
+            // Log scan summary
+            const scanSummary = `📊 Scan: ${allSymbols.length} symbols (${targetSymbols.length} target, ${ourSymbols.length} ours) | Scale: ${(scaleFactor * 100).toFixed(1)}% | Available: $${ourPortfolio.available.toFixed(2)}`;
+            logger.info(scanSummary);
 
-            // Process each symbol
-            for (const symbol of allSymbols) {
-                try {
-                    await this.syncPosition(symbol, scaleFactor, scanStartTime);
-                } catch (e: any) {
-                    logger.error(`Error syncing ${symbol}: ${e.message}`);
-                }
-            }
+            // Process each symbol with timeout protection
+            const syncPromises = allSymbols.map(symbol =>
+                Promise.race([
+                    this.syncPosition(symbol, scaleFactor, scanStartTime),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Sync timeout')), 30000) // 30 second timeout per symbol
+                    )
+                ]).catch((e: any) => {
+                    logger.error(`❌ ${symbol}: ${e.message}`);
+                })
+            );
+
+            await Promise.all(syncPromises);
+
+            // Log completion
+            const duration = Date.now() - scanStartTime;
+            logger.info(`✅ Scan complete (${duration}ms)`);
         } catch (e: any) {
-            logger.error(`COPY TRADING: Scan failed - ${e.message}`);
+            logger.error(`❌ Scan failed: ${e.message}`);
+            logger.error(e.stack);
         }
     }
 
@@ -262,7 +284,8 @@ export class CopyTradingManager {
             }
         }
 
-        logger.info(`🔄 ${symbol}: ${action.toUpperCase()} (Target: ${targetSide} ${targetLeverage}x, Ours: ${ourSide})`);
+        // Only log actions that will be executed
+        logger.info(`🔄 ${symbol}: ${action.toUpperCase()} ${targetSide} ${targetLeverage}x`);
 
         // Track trade start time for latency measurement
         const tradeKey = `${symbol}_${scanStartTime}`;
@@ -294,13 +317,8 @@ export class CopyTradingManager {
                 const requiredMargin = positionValueUSD / targetLeverage;
                 const requiredMarginWithBuffer = requiredMargin * 1.2; // 20% safety buffer
 
-                logger.info(`💰 ${symbol}: Position value $${positionValueUSD.toFixed(2)}, Leverage ${targetLeverage}x`);
-                logger.info(`   Required margin: $${requiredMargin.toFixed(2)} (with buffer: $${requiredMarginWithBuffer.toFixed(2)})`);
-                logger.info(`   Available margin: $${ourPortfolio.available.toFixed(2)}`);
-
                 if (requiredMarginWithBuffer > ourPortfolio.available) {
-                    logger.warn(`⚠️  ${symbol}: Insufficient margin (with 20% safety buffer)`);
-                    logger.warn(`   Need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)} available`);
+                    logger.warn(`⚠️  ${symbol}: Insufficient margin - need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)}`);
                     return;
                 }
             } else {
@@ -457,22 +475,12 @@ export class CopyTradingManager {
                 // Don't reconnect here, wait for close event
             });
 
-            // Subscribe to target vault fills
-            wsClient.userEvents({ user: COPY_TRADER }, async (data) => {
-                try {
-                    if (data && 'fills' in data) {
-                        const fills = data.fills;
-
-                        // Log fills to database for TWAP detection and analysis
-                        for (const fill of fills) {
-                            await this.logTargetFill(fill);
-                        }
-
-                        logger.info(`📥 Target vault fill: ${fills[0].coin} ${fills[0].side} ${fills[0].sz} @ ${fills[0].px}`);
-                    }
-                } catch (error: any) {
+            // Subscribe to target vault fills (non-blocking)
+            wsClient.userEvents({ user: COPY_TRADER }, (data) => {
+                // Don't await - process in background to avoid blocking WebSocket
+                this.processUserEvents(data).catch((error) => {
                     logger.error(`Error processing userEvents: ${error.message}`);
-                }
+                });
             });
 
             logger.info(`👀 Watching target vault: ${COPY_TRADER}`);
@@ -544,6 +552,35 @@ export class CopyTradingManager {
                 logger.debug(`💓 WebSocket healthy (last message ${(timeSinceLastMessage / 1000).toFixed(0)}s ago)`);
             }
         }, 30000); // Check every 30 seconds
+    }
+
+    /**
+     * Process user events from WebSocket (non-blocking)
+     */
+    private static async processUserEvents(data: any) {
+        try {
+            if (data && 'fills' in data) {
+                const fills = data.fills;
+
+                // Log fills to database for TWAP detection and analysis
+                // Use Promise.all with timeout to avoid blocking
+                const logPromises = fills.map((fill: any) =>
+                    Promise.race([
+                        this.logTargetFill(fill),
+                        new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('Database write timeout')), 5000)
+                        )
+                    ]).catch((error) => {
+                        logger.error(`Failed to log fill for ${fill.coin}: ${error.message}`);
+                    })
+                );
+
+                await Promise.all(logPromises);
+                logger.info(`📥 Target vault fill: ${fills[0].coin} ${fills[0].side} ${fills[0].sz} @ ${fills[0].px}`);
+            }
+        } catch (error: any) {
+            logger.error(`Error in processUserEvents: ${error.message}`);
+        }
     }
 
     /**
