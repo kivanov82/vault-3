@@ -372,8 +372,8 @@ export class CopyTradingManager {
                         // Need to INCREASE position size (add more)
                         logger.info(`📈 ${symbol}: Increasing position by ${Math.abs(sizePercent).toFixed(1)}% (${ourSize.toFixed(4)} → ${targetSizeForUs.toFixed(4)})`);
 
-                        // Open additional position with same leverage
-                        await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage);
+                        // Open additional position with same leverage (allowAddToExisting = true)
+                        await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage, true);
                         await this.logCopyTrade(symbol, 'increase', targetSide, sizeDelta, market, targetLeverage, scanStartTime);
                     } else {
                         // Need to DECREASE position size (partial close)

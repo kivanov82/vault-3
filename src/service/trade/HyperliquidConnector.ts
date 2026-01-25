@@ -52,10 +52,11 @@ export class HyperliquidConnector {
     /**
      * Open a copy position with specified size and leverage (no TP/SL)
      * Used for copytrading where we match target vault's positions exactly
+     * @param allowAddToExisting - If true, allows adding to existing position (for rebalancing)
      */
-    static async openCopyPosition(ticker: any, long: boolean, size: number, leverage: number) {
+    static async openCopyPosition(ticker: any, long: boolean, size: number, leverage: number, allowAddToExisting: boolean = false) {
         const position = await this.getOpenPosition(TRADING_WALLET, ticker.syn);
-        if (position) {
+        if (position && !allowAddToExisting) {
             logger.info('Position already exists');
             return;
         }
@@ -63,21 +64,23 @@ export class HyperliquidConnector {
         const market = await this.getMarket(ticker.syn);
         const priceDecimals = market < 1 ? 5 : (market < 10 ? 2 : 0);
 
-        // Set leverage first (Cross margin mode)
-        logger.info(`⚙️  ${ticker.syn}: Setting leverage to ${leverage}x Cross (asset id: ${ticker.id})`);
-        try {
-            const leverageResult = await this.getClients().wallet.updateLeverage({
-                asset: ticker.id,
-                isCross: true,
-                leverage: leverage
-            });
-            logger.info(`✅ ${ticker.syn}: Leverage set to ${leverage}x Cross - ${JSON.stringify(leverageResult)}`);
+        // Set leverage first (Cross margin mode) - only if opening new position or leverage changed
+        if (!position || position.leverage.value !== leverage) {
+            logger.info(`⚙️  ${ticker.syn}: Setting leverage to ${leverage}x Cross (asset id: ${ticker.id})`);
+            try {
+                const leverageResult = await this.getClients().wallet.updateLeverage({
+                    asset: ticker.id,
+                    isCross: true,
+                    leverage: leverage
+                });
+                logger.info(`✅ ${ticker.syn}: Leverage set to ${leverage}x Cross - ${JSON.stringify(leverageResult)}`);
 
-            // Wait for leverage update to propagate
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        } catch (error: any) {
-            logger.error(`❌ ${ticker.syn}: Failed to set leverage - ${error.message}`);
-            throw error;
+                // Wait for leverage update to propagate
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            } catch (error: any) {
+                logger.error(`❌ ${ticker.syn}: Failed to set leverage - ${error.message}`);
+                throw error;
+            }
         }
 
         // Get actual withdrawable amount and cap size to what we can afford
