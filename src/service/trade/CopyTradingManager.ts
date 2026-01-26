@@ -487,12 +487,11 @@ export class CopyTradingManager {
 
     private static initializeWebSocket() {
         try {
-            // Clean up existing connections and listeners
+            // Clean up existing connections
             if (wsTransport) {
                 try {
-                    // Remove all event listeners before closing to prevent leaks
-                    wsTransport.socket.removeAllListeners();
-                    wsTransport.socket.close();
+                    // Close with permanently=true to prevent auto-reconnect and clean up listeners
+                    wsTransport.socket.close(1000, 'Reconnecting', true);
                 } catch (e) {
                     // Ignore errors on close
                 }
