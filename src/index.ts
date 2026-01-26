@@ -60,6 +60,17 @@ app.get('/', (req, res) => {
     res.send('Welcome to Vault 3 API');
 });
 
+app.get('/health', (req, res) => {
+    const uptime = Math.floor(process.uptime() / 60);
+    const mem = process.memoryUsage();
+    res.json({
+        status: 'healthy',
+        uptime_minutes: uptime,
+        memory_mb: Math.round(mem.heapUsed / 1024 / 1024),
+        timestamp: new Date().toISOString()
+    });
+});
+
 
 app.listen(port, () => {
     Vault3.init();
