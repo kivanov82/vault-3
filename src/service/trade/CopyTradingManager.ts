@@ -354,17 +354,19 @@ export class CopyTradingManager {
             const positionValueUSD = targetSizeForUs * market;
             const marginRequired = positionValueUSD / targetLeverage;
 
-            // Check minimum requirements
+            // Check minimum requirements (skip for close - always allow closing positions)
             const EXCHANGE_MIN_POSITION_VALUE = 10;
 
-            if (marginRequired < MIN_POSITION_SIZE_USD) {
-                logger.warn(`⚠️  ${symbol}: Margin $${marginRequired.toFixed(2)} < $${MIN_POSITION_SIZE_USD} minimum`);
-                return;
-            }
+            if (action !== 'close') {
+                if (marginRequired < MIN_POSITION_SIZE_USD) {
+                    logger.warn(`⚠️  ${symbol}: Margin $${marginRequired.toFixed(2)} < $${MIN_POSITION_SIZE_USD} minimum`);
+                    return;
+                }
 
-            if (positionValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
-                logger.warn(`⚠️  ${symbol}: Position $${positionValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum`);
-                return;
+                if (positionValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
+                    logger.warn(`⚠️  ${symbol}: Position $${positionValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum`);
+                    return;
+                }
             }
 
             // Check if we have enough margin for open/flip actions
