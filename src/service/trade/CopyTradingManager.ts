@@ -48,6 +48,11 @@ const MAX_RECONNECT_DELAY = 60000; // 1 minute max
 const assetMetadataCache = new Map<string, any>();
 let assetMetadataFetched = false;
 
+// Scan mutex to prevent overlapping scans
+let isScanRunning = false;
+let lastScanStartTime = 0;
+const SCAN_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes max per scan
+
 export class CopyTradingManager {
 
     /**
@@ -120,8 +125,33 @@ export class CopyTradingManager {
      * This is resilient to TWAP orders since we compare final states, not individual fills
      */
     static async scanTraders() {
+        // Prevent overlapping scans
+        if (isScanRunning) {
+            const timeSinceLastScan = Date.now() - lastScanStartTime;
+            if (timeSinceLastScan < SCAN_TIMEOUT_MS) {
+                logger.warn(`⏸️  Scan already running (${Math.floor(timeSinceLastScan / 1000)}s elapsed), skipping this iteration`);
+                return;
+            } else {
+                logger.error(`🚨 Previous scan hung (${Math.floor(timeSinceLastScan / 1000)}s elapsed), force-resetting mutex`);
+                isScanRunning = false;
+            }
+        }
+
+        isScanRunning = true;
+        lastScanStartTime = Date.now();
         const scanStartTime = Date.now();
 
+        try {
+            await this._doScan(scanStartTime);
+        } finally {
+            isScanRunning = false;
+        }
+    }
+
+    /**
+     * Internal scan implementation
+     */
+    private static async _doScan(scanStartTime: number) {
         // Clean up expired failed order cooldowns
         const now = Date.now();
         for (const [symbol, failedTime] of failedOrders.entries()) {
@@ -131,14 +161,26 @@ export class CopyTradingManager {
         }
 
         try {
-            // Test database connection health
-            await prisma.$queryRaw`SELECT 1`;
+            // Test database connection health with timeout
+            await Promise.race([
+                prisma.$queryRaw`SELECT 1`,
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Database health check timeout')), 5000)
+                )
+            ]);
         } catch (dbError: any) {
             logger.error(`❌ Database connection check failed: ${dbError.message}`);
-            // Try to reconnect
+            // Try to reconnect with timeout
             try {
-                await prisma.$disconnect();
-                await prisma.$connect();
+                await Promise.race([
+                    (async () => {
+                        await prisma.$disconnect();
+                        await prisma.$connect();
+                    })(),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Database reconnection timeout')), 10000)
+                    )
+                ]);
                 logger.info(`✅ Database reconnected`);
             } catch (reconnectError: any) {
                 logger.error(`❌ Database reconnection failed: ${reconnectError.message}`);
@@ -445,9 +487,11 @@ export class CopyTradingManager {
 
     private static initializeWebSocket() {
         try {
-            // Clean up existing connections
+            // Clean up existing connections and listeners
             if (wsTransport) {
                 try {
+                    // Remove all event listeners before closing to prevent leaks
+                    wsTransport.socket.removeAllListeners();
                     wsTransport.socket.close();
                 } catch (e) {
                     // Ignore errors on close

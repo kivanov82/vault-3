@@ -198,7 +198,7 @@ export class HyperliquidConnector {
 
         // Create new clients only once
         const transport = new hl.HttpTransport({
-            timeout: null,
+            timeout: 30000, // 30 second timeout for ALL HTTP requests (CRITICAL FIX)
             server: {
                 mainnet: {
                     rpc: 'https://rpc.hyperlend.finance',

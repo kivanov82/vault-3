@@ -18,26 +18,31 @@ process.on('uncaughtException', (error) => {
 });
 
 // Handle graceful shutdown
-process.on('SIGTERM', async () => {
-    console.log('👋 SIGTERM received, shutting down gracefully...');
+const shutdown = async (signal: string) => {
+    console.log(`👋 ${signal} received, shutting down gracefully...`);
     try {
-        // Give ongoing operations 5 seconds to complete
-        await new Promise(resolve => setTimeout(resolve, 5000));
-    } catch (e) {
-        console.error('Error during shutdown:', e);
-    }
-    process.exit(0);
-});
+        // Import prisma to disconnect
+        const { PrismaClient } = require('@prisma/client');
+        const prisma = new PrismaClient();
 
-process.on('SIGINT', async () => {
-    console.log('👋 SIGINT received, shutting down gracefully...');
-    try {
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        // Disconnect database
+        await Promise.race([
+            prisma.$disconnect(),
+            new Promise(resolve => setTimeout(resolve, 3000))
+        ]);
+
+        // Give other ongoing operations 2 more seconds to complete
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        console.log('✅ Shutdown complete');
     } catch (e) {
         console.error('Error during shutdown:', e);
     }
     process.exit(0);
-});
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 app.use(express.json())                   //Express
     .use(cors())                            //CORS enabled

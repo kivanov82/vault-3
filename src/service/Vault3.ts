@@ -8,6 +8,9 @@ dotenv.config();
 const ENABLE_COPY_TRADING = process.env.ENABLE_COPY_TRADING === 'true';
 const COPY_POLL_INTERVAL_MINUTES = parseInt(process.env.COPY_POLL_INTERVAL_MINUTES || '5');
 
+// Track intervals for cleanup
+let heartbeatInterval: NodeJS.Timeout | null = null;
+
 export class Vault3 {
 
     static async init(): Promise<any> {
@@ -15,7 +18,7 @@ export class Vault3 {
         console.log(`   Copy Trading: ${ENABLE_COPY_TRADING ? '✅ ENABLED' : '❌ DISABLED'}`);
 
         // Heartbeat to ensure process is alive and monitor resources
-        setInterval(() => {
+        heartbeatInterval = setInterval(() => {
             const uptime = Math.floor(process.uptime() / 60);
             const mem = process.memoryUsage();
             console.log(`💓 Heartbeat: ${uptime}m uptime | Heap: ${Math.round(mem.heapUsed / 1024 / 1024)}MB / ${Math.round(mem.heapTotal / 1024 / 1024)}MB | RSS: ${Math.round(mem.rss / 1024 / 1024)}MB`);
@@ -43,9 +46,17 @@ export class Vault3 {
 
             // Position-based polling - every N minutes at second 0
             schedule.scheduleJob(`0 */${COPY_POLL_INTERVAL_MINUTES} * * * *`, async () => {
+                const scanTimeout = (COPY_POLL_INTERVAL_MINUTES - 1) * 60 * 1000; // Leave 1 minute buffer
                 try {
                     console.log(`⏰ [${new Date().toISOString()}] Running scheduled position scan...`);
-                    await CopyTradingManager.scanTraders();
+
+                    // Add timeout wrapper to prevent scan from running longer than the interval
+                    await Promise.race([
+                        CopyTradingManager.scanTraders(),
+                        new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error(`Scan exceeded ${COPY_POLL_INTERVAL_MINUTES - 1} minute timeout`)), scanTimeout)
+                        )
+                    ]);
                 } catch (error: any) {
                     console.error(`❌ Scheduled scan failed: ${error.message}`);
                     console.error(error.stack);
