@@ -407,6 +407,17 @@ export class CopyTradingManager {
                     // Adjust position size to match target allocation
                     const sizeDelta = targetSizeForUs - ourSize;
                     const sizePercent = (sizeDelta / ourSize) * 100;
+                    const adjustmentValueUSD = Math.abs(sizeDelta) * market;
+
+                    // Check if adjustment is below exchange minimum ($10)
+                    if (adjustmentValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
+                        // Position is too small to adjust - close it entirely
+                        logger.warn(`⚠️  ${symbol}: Adjustment $${adjustmentValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum, closing position`);
+                        await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long');
+                        logger.info(`✅ ${symbol}: CLOSE (too small to adjust) ${ourSide} ${ourSize.toFixed(4)}`);
+                        await this.logCopyTrade(symbol, 'close', ourSide, 0, market, targetLeverage, scanStartTime);
+                        break;
+                    }
 
                     if (sizeDelta > 0) {
                         await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage, true);
