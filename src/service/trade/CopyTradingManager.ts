@@ -413,12 +413,9 @@ export class CopyTradingManager {
 
                     // Check if adjustment is below exchange minimum ($10)
                     if (adjustmentValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
-                        // Position is too small to adjust - close it entirely
-                        logger.warn(`⚠️  ${symbol}: Adjustment $${adjustmentValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum, closing position`);
-                        await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long');
-                        logger.info(`✅ ${symbol}: CLOSE (too small to adjust) ${ourSide} ${ourSize.toFixed(4)}`);
-                        await this.logCopyTrade(symbol, 'close', ourSide, 0, market, targetLeverage, scanStartTime);
-                        break;
+                        // Adjustment too small - skip and keep current position (within threshold tolerance)
+                        logger.warn(`⏸️  ${symbol}: Adjustment $${adjustmentValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum, skipping (keeping current position)`);
+                        return; // Don't adjust, don't close - just keep as-is to avoid open-close loop
                     }
 
                     if (sizeDelta > 0) {
