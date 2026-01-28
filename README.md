@@ -233,6 +233,30 @@ Real-time WebSocket connection for data collection:
 
 ---
 
+## Strategy Analysis
+
+After importing historical data, run analysis scripts to understand the target vault's strategy:
+
+```bash
+# 1. Collect market data
+npm run backfill:candles    # ~80,000 hourly candles
+npm run backfill:funding    # ~10,000 funding records
+npm run enrich:trades       # Add BTC/ETH prices to trades
+
+# 2. Run analysis
+npm run analysis:all        # Run primary analyses
+
+# Individual analyses:
+npm run analysis:patterns   # When does target trade? (hour/day/session)
+npm run analysis:performance # Win rate, Sharpe, best/worst symbols
+npm run analysis:correlation # Does target follow BTC? Funding?
+npm run analysis:twap       # TWAP usage patterns
+```
+
+Reports are saved to `/reports/` directory and database (`AnalysisReport` table).
+
+---
+
 ## Deployment
 
 ### Docker
@@ -258,10 +282,12 @@ npm run docker-push
 - [x] Historical data import (6,000+ fills)
 - [x] TWAP detection & aggregation
 - [x] Real-time WebSocket monitoring
-- [ ] Market data collection (candles, indicators)
+- [x] Market data collection (candles, funding rates)
+- [x] Technical indicators (RSI, MACD, BB, ATR, EMA)
+- [x] Strategy analysis scripts (8 analysis types)
+- [x] ML feature engineering (50+ features)
 - [ ] Analytics dashboard
-- [ ] Pattern recognition
-- [ ] Predictive modeling
+- [ ] Predictive modeling (shadow mode)
 
 ### Phase 2: Independent Trading (Months 6-12)
 
@@ -286,4 +312,4 @@ Proprietary - All rights reserved
 
 ---
 
-**Last Updated**: 2026-01-24
+**Last Updated**: 2026-01-26

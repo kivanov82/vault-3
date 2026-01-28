@@ -48,7 +48,7 @@ model Trade {
   entryPrice      Float
   exitPrice       Float?
   size            Float
-  leverage        Float
+  leverage        Float?   // Nullable - unknown for historical imports
 
   // Performance
   pnl             Float?
@@ -140,4 +140,118 @@ model PositionSnapshot {
 
   @@index([traderAddress, timestamp])
   @@index([symbol, timestamp])
+}
+
+// Pre-computed technical indicators for analysis
+model TechnicalIndicator {
+  id          String   @id @default(uuid())
+  symbol      String
+  timeframe   String   // '1h' | '4h' | '1d'
+  timestamp   DateTime
+
+  // Moving averages
+  ema9        Float?
+  ema21       Float?
+  ema50       Float?
+  ema200      Float?
+
+  // RSI
+  rsi14       Float?
+
+  // MACD
+  macd        Float?
+  macdSignal  Float?
+  macdHist    Float?
+
+  // Bollinger Bands
+  bbUpper     Float?
+  bbMiddle    Float?
+  bbLower     Float?
+  bbWidth     Float?
+
+  // Volatility
+  atr14       Float?
+
+  createdAt   DateTime @default(now())
+
+  @@unique([symbol, timeframe, timestamp])
+  @@index([symbol, timeframe, timestamp])
+}
+
+// Feature snapshots for ML training/prediction
+model FeatureSnapshot {
+  id          String   @id @default(uuid())
+  symbol      String
+  timestamp   DateTime
+
+  // All features stored as JSON for flexibility
+  features    Json
+
+  // Label: 1 = target traded within next hour, 0 = no trade, null = unlabeled
+  label       Int?
+
+  // Direction if labeled: 1 = long, -1 = short, null = unlabeled
+  direction   Int?
+
+  createdAt   DateTime @default(now())
+
+  @@unique([symbol, timestamp])
+  @@index([symbol, timestamp])
+  @@index([label])
+}
+
+// ML predictions for shadow mode validation + paper trading
+model Prediction {
+  id          String   @id @default(uuid())
+  timestamp   DateTime
+  symbol      String
+
+  // Model output
+  prediction  Float    // Score 0-100
+  confidence  Float    // Confidence level
+  direction   Int?     // Predicted direction: 1 = long, -1 = short
+  reasons     String[] // Signals that triggered prediction
+
+  // Paper trading
+  entryPrice  Float?   // Price when prediction was made
+  exitPrice   Float?   // Price at validation time
+  paperPnl    Float?   // Theoretical P&L if we acted on prediction
+  paperPnlPct Float?   // P&L as percentage
+
+  // Ground truth - what copy trading actually did
+  copyAction  String?  // 'open' | 'close' | 'flip' | 'adjust' | 'none'
+  copySide    String?  // 'long' | 'short' | null
+  copySize    Float?   // Size of copy trade
+
+  // Validation
+  actualLabel Int?     // 1 = trade happened, 0 = no trade
+  correct     Boolean? // Was prediction correct?
+  validatedAt DateTime? // When prediction was validated
+
+  // Model metadata
+  modelVersion String  @default("pattern-v1")
+  features    Json?    // Input features used
+
+  createdAt   DateTime @default(now())
+
+  @@index([symbol, timestamp])
+  @@index([correct])
+  @@index([validatedAt])
+}
+
+// Saved analysis reports
+model AnalysisReport {
+  id          String   @id @default(uuid())
+  type        String   // 'trading-patterns' | 'performance' | 'correlation' | etc.
+  timestamp   DateTime @default(now())
+
+  // Full report data
+  data        Json
+
+  // Human-readable summary
+  summary     String?
+
+  createdAt   DateTime @default(now())
+
+  @@index([type, timestamp])
 }

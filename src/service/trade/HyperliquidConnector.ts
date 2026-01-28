@@ -15,35 +15,35 @@ export class HyperliquidConnector {
         wallet: hl.ExchangeClient<any>;
     } | null = null;
 
-    static marketClosePosition(ticker, long: boolean, percent: number = 1) {
-        return this.getOpenPosition(TRADING_WALLET, ticker.syn).then(position => {
+    static marketClosePosition(ticker, long: boolean, percent: number = 1, marketPrice?: number) {
+        return this.getOpenPosition(TRADING_WALLET, ticker.syn).then(async position => {
             if (position && ((this.positionSide(position) === 'long' && long) || (this.positionSide(position) === 'short' && !long))) {
-                return this.getMarket(ticker.syn).then(market => {
-                    const priceDecimals = market < 1 ? 5 : (market < 10 ? 2 : 0);
-                    //for instant fill
-                    const orderInstantPrice = long ? (market * 99 / 100) : (market * 101 / 100);
-                    const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();
-                    const orderSize = Math.abs(Number(position.szi) * percent);
-                    const orderSizeString = orderSize.toFixed(ticker.szDecimals).toString();
-                    return this.getClients().wallet.order({
-                        orders: [
-                            {
-                                a: ticker.id,
-                                b: !long,
-                                p: orderInstantPriceString,
-                                s: orderSizeString,
-                                r: true,   // reduce-only
-                                t: {
-                                    limit: {
-                                        tif: 'FrontendMarket'
-                                    }
+                // Use provided market price or fetch if not provided
+                const market = marketPrice ?? await this.getMarket(ticker.syn);
+                const priceDecimals = market < 1 ? 5 : (market < 10 ? 2 : 0);
+                // 2% slippage for instant fill (increased from 1% to handle thin orderbooks)
+                const orderInstantPrice = long ? (market * 0.98) : (market * 1.02);
+                const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();
+                const orderSize = Math.abs(Number(position.szi) * percent);
+                const orderSizeString = orderSize.toFixed(ticker.szDecimals).toString();
+                return this.getClients().wallet.order({
+                    orders: [
+                        {
+                            a: ticker.id,
+                            b: !long,
+                            p: orderInstantPriceString,
+                            s: orderSizeString,
+                            r: true,   // reduce-only
+                            t: {
+                                limit: {
+                                    tif: 'FrontendMarket'
                                 }
                             }
-                        ],
-                        grouping: "na",
-                    }).catch(error => {
-                        logger.error(error)
-                    });
+                        }
+                    ],
+                    grouping: "na",
+                }).catch(error => {
+                    logger.error(error)
                 });
             }
         });
@@ -53,15 +53,17 @@ export class HyperliquidConnector {
      * Open a copy position with specified size and leverage (no TP/SL)
      * Used for copytrading where we match target vault's positions exactly
      * @param allowAddToExisting - If true, allows adding to existing position (for rebalancing)
+     * @param marketPrice - Optional pre-fetched market price to avoid API call
      */
-    static async openCopyPosition(ticker: any, long: boolean, size: number, leverage: number, allowAddToExisting: boolean = false) {
+    static async openCopyPosition(ticker: any, long: boolean, size: number, leverage: number, allowAddToExisting: boolean = false, marketPrice?: number) {
         const position = await this.getOpenPosition(TRADING_WALLET, ticker.syn);
         if (position && !allowAddToExisting) {
             // Silent return - position already exists (not an error)
             return;
         }
 
-        const market = await this.getMarket(ticker.syn);
+        // Use provided market price or fetch if not provided
+        const market = marketPrice ?? await this.getMarket(ticker.syn);
         const priceDecimals = market < 1 ? 5 : (market < 10 ? 2 : 0);
 
         // Set leverage first (Cross margin mode) - only if opening new position or leverage changed
@@ -91,8 +93,8 @@ export class HyperliquidConnector {
             logger.warn(`⚠️  ${ticker.syn}: Capping size from ${size.toFixed(ticker.szDecimals)} to ${actualSize.toFixed(ticker.szDecimals)} (available margin: $${portfolio.available.toFixed(2)})`);
         }
 
-        // Place market order for instant fill with 1% slippage
-        const orderInstantPrice = long ? (market * 1.01) : (market * 0.99);
+        // Place market order for instant fill with 2% slippage (increased from 1% to handle thin orderbooks)
+        const orderInstantPrice = long ? (market * 1.02) : (market * 0.98);
         const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();
         const orderSizeString = actualSize.toFixed(ticker.szDecimals).toString();
 

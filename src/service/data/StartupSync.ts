@@ -37,13 +37,15 @@ export class StartupSync {
       const lastDbTimestamp = latestFillInDb?.timestamp || new Date(0);
       logger.info(`📅 Latest fill in DB: ${lastDbTimestamp.toISOString()}`);
 
-      // Fetch recent fills from API
+      // Fetch recent fills from API (last 5 days to avoid hitting API limits)
       const transport = new hl.HttpTransport();
       const info = new hl.InfoClient({ transport });
 
-      logger.info('📡 Fetching recent fills from Hyperliquid API...');
-      const apiFills = await info.userFills({
+      const fiveDaysAgo = Date.now() - (5 * 24 * 60 * 60 * 1000);
+      logger.info(`📡 Fetching fills from Hyperliquid API (since ${new Date(fiveDaysAgo).toISOString()})...`);
+      const apiFills = await info.userFillsByTime({
         user: COPY_TRADER,
+        startTime: fiveDaysAgo,
         aggregateByTime: false,
       });
 

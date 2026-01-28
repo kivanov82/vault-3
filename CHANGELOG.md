@@ -1,11 +1,62 @@
-# Phase 1 Updates - Enhanced Copytrading
+# Vault-3 Changelog
+
+---
+
+## 2026-01-26 - Strategy Analysis & ML Foundation
+
+### New Features
+
+**Data Collection Scripts:**
+- `npm run backfill:candles` - Fetch historical candles for all traded symbols (1h, 5m, 15m, 4h)
+- `npm run backfill:funding` - Fetch 8-hour funding rate epochs
+- `npm run enrich:trades` - Add BTC/ETH prices and funding rates to existing trades
+
+**Strategy Analysis (8 Scripts):**
+- `npm run analysis:patterns` - Trading hour/day/session patterns, symbol preferences
+- `npm run analysis:performance` - Win rate, P&L curve, Sharpe ratio, best/worst symbols
+- `npm run analysis:correlation` - Entry timing vs trends, BTC/funding correlation
+- `npm run analysis:twap` - TWAP duration, fill counts, size thresholds
+- `npm run analysis:entry-signals` - RSI/MACD/Bollinger Band patterns at entry
+- `npm run analysis:exit-signals` - Hold time distribution, TP/SL clustering
+- `npm run analysis:position-sizing` - Size distribution, leverage patterns, Kelly criterion
+- `npm run analysis:risk` - Drawdown analysis, sector concentration, risk metrics
+
+**ML Foundation:**
+- Technical indicators utility (`src/service/utils/indicators.ts`)
+  - RSI, MACD, Bollinger Bands, ATR, EMA (9/21/50/200)
+  - Stochastic Oscillator, ADX, Williams %R, ROC, OBV
+- Feature Engine (`src/service/ml/FeatureEngine.ts`)
+  - 50+ features: price, momentum, volatility, context, time, behavioral
+- Database models for ML:
+  - `TechnicalIndicator` - Pre-computed indicators
+  - `FeatureSnapshot` - ML features with labels
+  - `Prediction` - Shadow mode validation
+  - `AnalysisReport` - Saved analysis results
+
+### Database Changes
+- Added 4 new Prisma models
+- Migration: `20260126191804_add_analysis_models`
+
+---
+
+## 2026-01-25 - Position Rebalancing & Production Hardening
+
+- Implemented position size rebalancing (increase AND decrease)
+- Configurable adjustment threshold (default 10%)
+- Fixed critical resource leaks (HTTP client singleton pattern)
+- Fixed WebSocket event listener leak
+- Added database connection pool configuration
+
+---
+
+## 2026-01-24 - Phase 1 Launch & Enhanced Copytrading
 
 **Date**: 2026-01-24
 **Changes**: Removed limits, improved WebSocket reliability, auto-discover positions
 
 ---
 
-## Key Changes
+## Key Changes (2026-01-24)
 
 ### 1. ✅ Copy ALL Positions (No Ticker Whitelist)
 

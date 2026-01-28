@@ -5,6 +5,7 @@ import {logger} from "../utils/logger";
 import { PrismaClient } from '@prisma/client';
 import pg from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { PredictionLogger } from '../ml/PredictionLogger';
 
 dotenv.config(); // Load environment variables
 
@@ -192,11 +193,13 @@ export class CopyTradingManager {
             // Fetch asset metadata on first scan
             await this.fetchAssetMetadata();
 
-            // Get both vault portfolios to calculate scaling factor
-            const [targetPortfolio, ourPortfolio, targetPositions] = await Promise.all([
+            // Get both vault portfolios and all market prices in a single batch
+            // This avoids calling getMarket() for each symbol (which was causing timeouts)
+            const [targetPortfolio, ourPortfolio, targetPositions, allMarkets] = await Promise.all([
                 HyperliquidConnector.getPortfolio(COPY_TRADER),
                 HyperliquidConnector.getPortfolio(WALLET),
                 HyperliquidConnector.getOpenPositions(COPY_TRADER),
+                HyperliquidConnector.getMarkets(), // Fetch ALL markets once
             ]);
 
             // Calculate scaling factor based on vault sizes
@@ -221,11 +224,21 @@ export class CopyTradingManager {
             const scanSummary = `📊 Scan: ${allSymbols.length} symbols (${targetSymbols.length} target, ${ourSymbols.length} ours) | Scale: ${(scaleFactor * 100).toFixed(1)}% | Available: $${ourPortfolio.available.toFixed(2)}`;
             logger.info(scanSummary);
 
+            // Run predictions BEFORE copy actions (shadow mode)
+            try {
+                await PredictionLogger.logPredictions(allSymbols, allMarkets);
+            } catch (predError: any) {
+                logger.error(`Prediction logging failed: ${predError.message}`);
+            }
+
+            // Track which symbols had copy actions
+            const tradedSymbols = new Set<string>();
+
             // Process each symbol with timeout protection
-            // Pass the already-fetched positions to avoid redundant API calls
+            // Pass the already-fetched positions and markets to avoid redundant API calls
             const syncPromises = allSymbols.map(symbol =>
                 Promise.race([
-                    this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, ourPositions),
+                    this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, ourPositions, allMarkets, tradedSymbols),
                     new Promise((_, reject) =>
                         setTimeout(() => reject(new Error('Sync timeout')), 30000) // 30 second timeout per symbol
                     )
@@ -235,6 +248,22 @@ export class CopyTradingManager {
             );
 
             await Promise.all(syncPromises);
+
+            // Finalize predictions for symbols that had no copy action
+            try {
+                await PredictionLogger.finalizeScanPredictions(tradedSymbols);
+            } catch (finalizeError: any) {
+                // Non-critical error
+            }
+
+            // Validate past predictions periodically (every ~hour = 12 scans at 5 min intervals)
+            if (scanStartTime % (12 * 5 * 60 * 1000) < 5 * 60 * 1000) {
+                try {
+                    await PredictionLogger.validatePastPredictions();
+                } catch (validateError: any) {
+                    logger.error(`Prediction validation failed: ${validateError.message}`);
+                }
+            }
 
             // Log completion (only if there were actions)
             const duration = Date.now() - scanStartTime;
@@ -256,7 +285,9 @@ export class CopyTradingManager {
         scaleFactor: number,
         scanStartTime: number,
         targetPositions: any,
-        ourPositions: any
+        ourPositions: any,
+        allMarkets: Record<string, string>,
+        tradedSymbols: Set<string>
     ) {
         // Extract positions from already-fetched data (no additional API calls)
         const targetPosition = targetPositions.assetPositions
@@ -320,7 +351,7 @@ export class CopyTradingManager {
 
         // Execute action if needed
         if (positionDelta.needsAction) {
-            await this.executePositionSync(positionDelta, tickerConfig, scanStartTime);
+            await this.executePositionSync(positionDelta, tickerConfig, scanStartTime, allMarkets, tradedSymbols);
         }
     }
 
@@ -330,7 +361,9 @@ export class CopyTradingManager {
     private static async executePositionSync(
         delta: any,
         tickerConfig: any,
-        scanStartTime: number
+        scanStartTime: number,
+        allMarkets: Record<string, string>,
+        tradedSymbols: Set<string>
     ) {
         const { symbol, action, targetSide, ourSide, targetSizeForUs, ourSize, targetLeverage } = delta;
         const isLong = targetSide === 'long';
@@ -350,7 +383,12 @@ export class CopyTradingManager {
         tradeStartTimes.set(tradeKey, Date.now());
 
         try {
-            const market = await HyperliquidConnector.getMarket(symbol);
+            // Use pre-fetched market price (no API call needed)
+            const market = Number(allMarkets[symbol]);
+            if (!market || isNaN(market)) {
+                logger.error(`❌ ${symbol}: No market price available`);
+                return;
+            }
             const positionValueUSD = targetSizeForUs * market;
             const marginRequired = positionValueUSD / targetLeverage;
 
@@ -383,26 +421,32 @@ export class CopyTradingManager {
                 logger.info(`💰 ${symbol}: Position value $${positionValueUSD.toFixed(2)}, Leverage ${targetLeverage}x`);
             }
 
-            // Execute the action
+            // Execute the action (pass market price to avoid additional API calls)
             switch (action) {
                 case 'close':
-                    await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long');
+                    await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', 1, market);
                     logger.info(`✅ ${symbol}: CLOSE ${ourSide} ${ourSize.toFixed(4)}`);
                     await this.logCopyTrade(symbol, 'close', ourSide, 0, market, targetLeverage, scanStartTime);
+                    tradedSymbols.add(symbol);
+                    await PredictionLogger.logCopyAction(symbol, 'close', ourSide, ourSize);
                     break;
 
                 case 'open':
-                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage);
+                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
                     logger.info(`✅ ${symbol}: OPEN ${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x`);
                     await this.logCopyTrade(symbol, 'open', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
+                    tradedSymbols.add(symbol);
+                    await PredictionLogger.logCopyAction(symbol, 'open', targetSide, targetSizeForUs);
                     break;
 
                 case 'flip':
-                    await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long');
+                    await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', 1, market);
                     await new Promise(resolve => setTimeout(resolve, 2000));
-                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage);
+                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
                     logger.info(`✅ ${symbol}: FLIP ${ourSide}→${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x`);
                     await this.logCopyTrade(symbol, 'flip', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
+                    tradedSymbols.add(symbol);
+                    await PredictionLogger.logCopyAction(symbol, 'flip', targetSide, targetSizeForUs);
                     break;
 
                 case 'adjust':
@@ -419,14 +463,18 @@ export class CopyTradingManager {
                     }
 
                     if (sizeDelta > 0) {
-                        await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage, true);
+                        await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage, true, market);
                         logger.info(`✅ ${symbol}: ADJUST +${Math.abs(sizePercent).toFixed(0)}% (${ourSize.toFixed(4)}→${targetSizeForUs.toFixed(4)})`);
                         await this.logCopyTrade(symbol, 'increase', targetSide, sizeDelta, market, targetLeverage, scanStartTime);
+                        tradedSymbols.add(symbol);
+                        await PredictionLogger.logCopyAction(symbol, 'increase', targetSide, sizeDelta);
                     } else {
                         const reducePercent = Math.abs(sizeDelta) / ourSize;
-                        await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', reducePercent);
+                        await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', reducePercent, market);
                         logger.info(`✅ ${symbol}: ADJUST -${Math.abs(sizePercent).toFixed(0)}% (${ourSize.toFixed(4)}→${targetSizeForUs.toFixed(4)})`);
                         await this.logCopyTrade(symbol, 'decrease', targetSide, Math.abs(sizeDelta), market, targetLeverage, scanStartTime);
+                        tradedSymbols.add(symbol);
+                        await PredictionLogger.logCopyAction(symbol, 'decrease', targetSide, Math.abs(sizeDelta));
                     }
                     break;
             }

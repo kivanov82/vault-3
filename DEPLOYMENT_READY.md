@@ -1,8 +1,8 @@
 # Vault-3 - Deployment Ready ✅
 
-**Status**: Production-ready Phase 1 copytrading bot
-**Date**: 2026-01-24
-**Version**: 1.0.0
+**Status**: Production-ready Phase 1 copytrading bot + Strategy Analysis Tools
+**Date**: 2026-01-26
+**Version**: 1.1.0
 
 ---
 
@@ -14,10 +14,10 @@
    - Auto-discovers ALL positions (no manual ticker lists)
    - Scaled position sizing based on vault size ratio
    - Exact leverage matching (no artificial limits)
-   - 10-minute polling interval (configurable)
+   - 5-minute polling interval (configurable)
 
 2. **Startup Data Integrity Check**
-   - **NEW**: Syncs last 2,000 fills from API on every startup
+   - Syncs last 2,000 fills from API on every startup
    - Compares with database, imports any missing fills
    - Ensures 100% data completeness
    - Handles bot downtime, WebSocket disconnects, database issues
@@ -35,7 +35,7 @@
 
 5. **Database**
    - PostgreSQL on Google Cloud SQL
-   - Complete schema with fills, trades, candles, funding rates
+   - 8 models: Fill, Trade, Candle, FundingRate, PositionSnapshot, TechnicalIndicator, FeatureSnapshot, Prediction, AnalysisReport
    - Comprehensive logging with latency tracking
 
 6. **Documentation**
@@ -43,6 +43,28 @@
    - CLAUDE.md - Technical implementation details
    - CHANGELOG.md - Recent changes
    - .env.example - Configuration template
+
+### ✅ Strategy Analysis Tools (NEW)
+
+7. **Data Collection Scripts**
+   - `npm run backfill:candles` - Historical candles (1h, 5m, 15m, 4h)
+   - `npm run backfill:funding` - 8-hour funding rate epochs
+   - `npm run enrich:trades` - Add BTC/ETH prices to trades
+
+8. **Analysis Scripts (8 types)**
+   - Trading patterns (hour/day/session distribution)
+   - Performance metrics (win rate, Sharpe, P&L)
+   - Market correlation (BTC/ETH/funding)
+   - TWAP analysis (duration, size threshold)
+   - Entry signals (RSI, MACD, BB patterns)
+   - Exit signals (hold time, TP/SL clusters)
+   - Position sizing (leverage, allocation)
+   - Risk management (drawdown, sector concentration)
+
+9. **ML Foundation**
+   - Technical indicators utility (RSI, MACD, BB, ATR, EMA, Stochastic, ADX)
+   - FeatureEngine with 50+ ML features
+   - Database schema for predictions and shadow mode
 
 ---
 
@@ -125,6 +147,48 @@ git push -u origin main
 ```
 
 **Note**: You'll need to configure GitHub authentication (SSH key or personal access token) before pushing.
+
+---
+
+## Strategy Analysis Workflow
+
+### 1. Apply Database Migration
+
+```bash
+npx prisma migrate dev --name add_analysis_models
+```
+
+### 2. Collect Market Data
+
+```bash
+# Fetch historical candles (~80,000 records)
+npm run backfill:candles
+
+# Fetch funding rates (~10,000 records)
+npm run backfill:funding
+
+# Enrich existing trades with BTC/ETH prices
+npm run enrich:trades
+```
+
+### 3. Run Analysis
+
+```bash
+# Quick: Run primary analyses
+npm run analysis:all
+
+# Or run individually:
+npm run analysis:patterns     # When does target trade?
+npm run analysis:performance  # Win rate, Sharpe ratio
+npm run analysis:correlation  # BTC/funding correlation
+npm run analysis:twap         # TWAP patterns
+```
+
+### 4. View Reports
+
+Reports are saved in two places:
+- **JSON files**: `/reports/` directory
+- **Database**: `AnalysisReport` table (view with `npx prisma studio`)
 
 ---
 
@@ -262,26 +326,30 @@ Track these for first week:
 
 ---
 
-## Files Modified Today
+## Files Modified (2026-01-26)
 
-**New Files:**
-- `src/service/data/StartupSync.ts` - Startup sync feature
-- `DEPLOYMENT_READY.md` - This file
+**New Files (Strategy Analysis):**
+- `scripts/backfill-candles.ts` - Historical candle fetching
+- `scripts/backfill-funding.ts` - Funding rate fetching
+- `scripts/enrich-trades.ts` - Trade context enrichment
+- `scripts/analysis/trading-patterns.ts` - Hour/day/session analysis
+- `scripts/analysis/performance-metrics.ts` - Win rate, Sharpe
+- `scripts/analysis/market-correlation.ts` - BTC/funding correlation
+- `scripts/analysis/twap-analysis.ts` - TWAP patterns
+- `scripts/analysis/entry-signals.ts` - Entry signal detection
+- `scripts/analysis/exit-signals.ts` - Exit signal detection
+- `scripts/analysis/position-sizing.ts` - Size/leverage analysis
+- `scripts/analysis/risk-management.ts` - Drawdown, risk metrics
+- `src/service/utils/indicators.ts` - Technical indicators
+- `src/service/ml/FeatureEngine.ts` - ML feature generation
+- `reports/` - Output directory for analysis
 
 **Updated Files:**
-- `src/service/Vault3.ts` - Added startup sync call
-- `README.md` - Documented startup sync
-- `CLAUDE.md` - Technical documentation
-- `.env.example` - Clean configuration template
-- `.gitignore` - Proper exclusions
-
-**Deleted Files:**
-- `IMPLEMENTATION_GUIDE.md` (obsolete)
-- `QUICK_START.md` (consolidated into README)
-- `PHASE_1_READY.md` (consolidated into README)
-- `DB_SETUP_STEPS.md` (obsolete)
-- `DATA_IMPORT_GUIDE.md` (consolidated into README)
-- `enable-public-access.md` (obsolete)
+- `prisma/schema.prisma` - Added 4 new models
+- `package.json` - Added 12 new npm scripts
+- `README.md` - Added strategy analysis section
+- `CLAUDE.md` - Updated roadmap, code structure, commands
+- `DEPLOYMENT_READY.md` - This file
 
 ---
 

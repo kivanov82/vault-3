@@ -7,12 +7,12 @@
     "start": "ts-node src/index.ts",
     "dev": "nodemon --exec ts-node src/index.ts",
     "test": "npx jest --silent=false",
-    "backfill": "ts-node scripts/backfill-target-vault.ts",
-    "import-csv": "ts-node scripts/import-csv-fills.ts",
     "docker-build": "docker build -t vault-3 .",
     "docker-tag": "docker tag vault-3 gcr.io/bright-union/vault-3",
     "gcloud-auth": "gcloud auth login",
-    "docker-push": "docker push gcr.io/bright-union/vault-3"
+    "docker-push": "docker push gcr.io/bright-union/vault-3",
+    "ml:predict": "ts-node scripts/ml/run-predictions.ts",
+    "ml:stats": "ts-node scripts/ml/prediction-stats.ts"
   },
   "author": "",
   "license": "ISC",

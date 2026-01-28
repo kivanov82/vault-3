@@ -1,25 +1,211 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
-**Project Status:** Phase 1 Operational
-**Last Updated:** 2026-01-25
+**Project Status:** Phase 1 Complete + Strategy Analysis + Prediction Engine
+**Last Updated:** 2026-01-27
 
 ---
 
 ## Current State
 
-✅ **Fully operational copytrading bot** with 6,083 historical fills and 2,222 trades imported.
+✅ **Fully operational copytrading bot** with comprehensive strategy analysis and prediction capabilities.
+
+### Data Summary
+
+| Metric | Value |
+|--------|-------|
+| Historical Fills | 18,842 |
+| Logical Trades | 2,297 |
+| Candles | 746,513 |
+| Funding Records | 79,756 |
+| Technical Indicators | 97,036 |
+| Date Range | Nov 17, 2025 - Jan 25, 2026 (69 days) |
 
 ### Configuration
 
 - **Our Vault:** `0xc94376c6e3e85dfbe22026d9fe39b000bcf649f0` (vault-3)
 - **Vault Leader:** `0x3Fc6E2D6c0E1D4072F876f74E03d191e2cC61922`
 - **Target Vault:** `0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3`
-- **Historical Data:** 67 days (Nov 17, 2025 - Jan 23, 2026)
 - **Copy Strategy:** Position-based with scaled sizing
 - **Leverage:** Exact 1:1 match with target
 - **Scan Interval:** 5 minutes (configurable)
 - **Slippage:** 1% for market orders
 - **Infrastructure:** Google Cloud Run + Cloud SQL (PostgreSQL)
+
+---
+
+## Strategy Analysis Results
+
+### Performance Summary (69 days)
+
+| Metric | Value |
+|--------|-------|
+| **Total P&L** | **$448,194** |
+| Win Rate | 43% |
+| Avg Win | $878 |
+| Avg Loss | $309 |
+| Win/Loss Ratio | 2.84x |
+| Profit Factor | 2.15 |
+| Sharpe Ratio | ~5.86 |
+| Max Drawdown | $45,284 |
+
+### Top Performing Symbols
+
+| Symbol | Trades | Win Rate | P&L |
+|--------|--------|----------|-----|
+| PUMP | 84 | 81% | +$78,264 |
+| VVV | 167 | 38% | +$62,208 |
+| ETH | 52 | 52% | +$56,092 |
+| IP | 77 | 47% | +$54,192 |
+| kPEPE | 45 | 53% | +$37,273 |
+
+### Worst Performing Symbols
+
+| Symbol | Trades | Win Rate | P&L |
+|--------|--------|----------|-----|
+| XMR | 34 | 6% | -$14,854 |
+| AVNT | 125 | 18% | -$13,620 |
+| SKY | 124 | 38% | -$9,052 |
+| DYM | 15 | 0% | -$5,786 |
+| kBONK | 39 | 21% | -$5,260 |
+
+### Entry Signal Patterns
+
+- **RSI at Entry:** Longs avg 51, Shorts avg 39 (shorts enter lower)
+- **Mean Reversion Score:** 10.5% (not a strong mean reversion strategy)
+- **BB Position:** Winners enter at 42% BB, Losers at 35% BB
+- **MACD Trend Following:** 42% (slightly contrarian)
+
+### Position Sizing Patterns
+
+- **Avg Leverage:** 4.75x (median 3x)
+- **Leverage by Direction:** Shorts 6.4x, Longs 4.4x
+- **Leverage Distribution:** 82% use 2-5x, 18% use 5-10x
+- **Top 3 Symbols:** 47% of portfolio
+- **Kelly Suggestion:** 1-5% fractional Kelly
+
+---
+
+## Prediction Engine
+
+### Architecture
+
+The prediction engine uses pattern matching based on historical analysis:
+
+```
+src/service/ml/
+├── PredictionEngine.ts    # Pattern-matching predictor
+└── FeatureEngine.ts       # 50+ feature generator
+
+scripts/ml/
+├── prepare-training-data.ts   # Creates labeled training data
+└── run-predictions.ts         # Runs live predictions
+```
+
+### Features Used (50+)
+
+**Price Features:**
+- Price change: 1h, 4h, 24h
+- Distance from EMA21, EMA50
+- Bollinger Band position (0-1)
+
+**Momentum:**
+- RSI(14)
+- MACD, MACD Signal, MACD Histogram
+
+**Volatility:**
+- ATR(14) as % of price
+- BB Width
+
+**Context:**
+- BTC change 1h, 24h
+- ETH change 1h
+- Funding rate
+
+**Time:**
+- Hour of day (0-23 UTC)
+- Day of week
+- Minutes to funding
+
+**Behavioral:**
+- Target trades last 24h
+- Target last trade side
+
+### Prediction Scoring
+
+| Factor | Points | Condition |
+|--------|--------|-----------|
+| Symbol Quality | ±15 | Best/worst performer |
+| RSI Signal | ±20 | Oversold/overbought |
+| BB Position | ±10 | Near bands |
+| Volatility | ±10 | High ATR |
+| Active Hour | +10 | Peak trading hours |
+| Recent Activity | +10 | Target traded recently |
+| BTC Movement | ±5 | BTC moving >1% |
+| Funding Rate | ±5 | High funding |
+
+**Prediction Threshold:** Score ≥ 65 = likely trade
+
+### Usage
+
+```bash
+# Run predictions on current market
+npm run ml:predict
+
+# Prepare training data (takes time)
+npm run ml:prepare
+```
+
+---
+
+## Roadmap
+
+### Phase 1: Copytrading ✅ Complete
+
+- [x] Position-based copytrading
+- [x] WebSocket monitoring with auto-reconnect
+- [x] TWAP detection & aggregation
+- [x] Position rebalancing (±10% threshold)
+- [x] Exact leverage matching
+
+### Phase 2: Data Collection ✅ Complete
+
+- [x] Historical candle backfill (746K+ candles)
+- [x] Multi-timeframe support (1h, 5m, 15m, 4h)
+- [x] Funding rate collection (80K+ records)
+- [x] Trade enrichment with market context
+- [x] Technical indicators (97K+ records)
+
+### Phase 3: Strategy Analysis ✅ Complete
+
+- [x] Trading patterns (hour/day/session)
+- [x] Performance metrics (win rate, Sharpe, P&L)
+- [x] Market correlation (BTC, funding)
+- [x] TWAP analysis
+- [x] Entry/exit signal detection
+- [x] Position sizing analysis
+- [x] Risk management analysis
+
+### Phase 4: Prediction Engine ✅ In Progress
+
+- [x] Feature engineering (50+ features)
+- [x] Pattern-matching predictor
+- [x] Prediction storage & validation
+- [ ] Training data preparation
+- [ ] Backtest predictions vs actual
+- [ ] Shadow mode validation (target: 70%+ accuracy)
+
+### Phase 5: Hybrid Execution (Planned)
+
+- [ ] Prediction-enhanced copytrading
+- [ ] Front-run high-confidence predictions
+- [ ] Skip low-confidence trades
+- [ ] A/B testing framework
+
+### Phase 6: Independent Trading (Planned)
+
+- [ ] 80% copy + 20% independent
+- [ ] Gradual transition based on accuracy
+- [ ] Full autonomy when Sharpe ≥ 1.5
 
 ---
 
@@ -35,9 +221,7 @@
 4. For each symbol:
    - Compare target position vs. our position
    - Determine action: OPEN, CLOSE, FLIP, or ADJUST
-   - Apply risk checks:
-     * Minimum margin: $5 USD
-     * Minimum position value: $10 USD (exchange requirement)
+   - Apply risk checks (min margin $5, min position $10)
    - Execute trade with exact leverage matching (1% slippage)
    - Log to database with latency tracking
 
@@ -45,26 +229,11 @@
 - **OPEN**: Target has position, we don't → Open new position
 - **CLOSE**: Target closed, we still have position → Close position
 - **FLIP**: Target changed direction (long↔short) → Close + Open opposite
-- **ADJUST**: Same direction but size differs >10% → Increase or decrease position size
-
-**Key Features:**
-
-- **Auto-discovery**: Scans all positions automatically (no manual ticker lists)
-- **Dynamic ticker support**: Fetches asset metadata from Hyperliquid API (no hardcoded TICKERS)
-- **TWAP-resilient**: Compares position states, not individual fills
-- **Scaled sizing**: Proportional to vault size ratio
-- **Position rebalancing**: Automatically adjusts position sizes to match target allocation (±10% threshold)
-- **No artificial limits**: Matches target's leverage and position sizes exactly
-- **Robust error handling**: Global error handlers prevent scheduler crashes
-- **Database health checks**: Auto-reconnect on connection failures
-- **HTTP client singleton**: Reuses connections to prevent resource leaks
-- **Comprehensive logging**: Every trade logged with latency, leverage, P&L
+- **ADJUST**: Same direction but size differs >10% → Increase or decrease
 
 ### TWAP Detection
 
-**Problem**: Target vault uses TWAP orders - one logical trade appears as many sequential fills.
-
-**Solution**: Aggregate fills into logical trades:
+Aggregates sequential fills into logical trades:
 
 ```typescript
 if (
@@ -73,132 +242,30 @@ if (
   fill.timestamp - previousFill.timestamp < 5 minutes &&
   isSameDirection(fill.szi, previousFill.szi)
 ) {
-  // Part of same TWAP order
   aggregateTrade.addFill(fill);
 } else {
-  // New logical trade
   startNewAggregateTrade(fill);
 }
 ```
 
 **Results**: 35% of trades detected as TWAP (773 out of 2,222).
 
-### WebSocket Reliability
-
-**Enhanced Reconnection Logic:**
-
-- Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s max
-- Health checks every 30 seconds
-- Force reconnect if no messages for 2 minutes
-- Clean shutdown of old connections before creating new ones
-
-**Health Check:**
-
-```typescript
-setInterval(() => {
-  const timeSinceLastMessage = Date.now() - lastMessageTime;
-  if (timeSinceLastMessage > 120000) {
-    // Force reconnect if stale >2 minutes
-    wsTransport.socket.close();
-  }
-}, 30000);
-```
-
 ---
 
 ## Database Schema
 
-### Tables
+### Core Tables
 
-**`Fill`** - Raw fill events
-- Individual executions (6,083 total)
-- Used for TWAP detection
-- Fields: fillId, timestamp, symbol, side, price, size, positionSzi, rawData
-
-**`Trade`** - Aggregated logical trades
-- TWAP orders grouped (2,222 total)
-- Performance tracking
-- Fields: trader, symbol, side, entryPrice, leverage, isCopyTrade, latencyMs, fillCount, twapDurationSeconds
-
-**`Candle`** - Market data (Phase 2)
-
-**`FundingRate`** - Funding rates (Phase 2)
-
-**`PositionSnapshot`** - Position tracking (Phase 2)
-
----
-
-## Key Metrics (Imported Data)
-
-```
-Date Range: 2025-11-17 to 2026-01-23 (67 days)
-
-Total Fills: 6,083
-Logical Trades: 2,222
-TWAP Trades: 773 (34.8%)
-Single Fill Trades: 1,449
-
-Top 10 Assets Traded:
-1. HYPE: 209 trades
-2. SPX: 196 trades
-3. VVV: 167 trades
-4. AVNT: 125 trades
-5. SKY: 124 trades
-6. FARTCOIN: 104 trades
-7. MON: 104 trades
-8. VIRTUAL: 85 trades
-9. PUMP: 83 trades
-10. IP: 77 trades
-```
-
----
-
-## Phase 1 Roadmap
-
-### Current Status: Week 1 Complete ✅
-
-- [x] Enhanced copytrading system
-- [x] PostgreSQL database on Google Cloud SQL
-- [x] Historical data import (6,000+ fills)
-- [x] TWAP detection & aggregation
-- [x] WebSocket monitoring with auto-reconnect
-- [x] Position-based syncing (10-minute interval)
-
-### Week 2-3: Market Data Collection
-
-- [ ] MarketDataCollector service
-- [ ] Multi-timeframe candle fetching (1m, 5m, 15m, 1h, 4h)
-- [ ] Technical indicators (RSI, MACD, BB, ATR, AO, Stoch)
-- [ ] Orderbook snapshots
-- [ ] Funding rate collection
-
-### Week 4-5: Analytics Dashboard
-
-- [ ] Express API endpoints (trade history, performance metrics)
-- [ ] Web dashboard or Grafana integration
-- [ ] Discord/Telegram alerting
-- [ ] Performance attribution
-
-### Week 6-8: Backtesting & Analysis
-
-- [ ] Backtesting engine
-- [ ] Historical performance analysis
-- [ ] Pattern recognition (time-of-day, market regime)
-- [ ] Win rate & Sharpe ratio calculations
-
-### Week 9-12: Prediction Models
-
-- [ ] Feature engineering (50+ features from market data)
-- [ ] ML models (Random Forest, XGBoost)
-- [ ] Binary classifier: "Will target open position in next 1h?"
-- [ ] Shadow mode validation (70%+ accuracy target)
-
-### Month 4-6: Phase 2 Preparation
-
-- [ ] Hybrid execution framework (copy + independent)
-- [ ] Independent trading logic
-- [ ] Paper trading validation
-- [ ] Gradual transition plan
+| Table | Records | Description |
+|-------|---------|-------------|
+| Fill | 18,842 | Raw fill events |
+| Trade | 2,297 | Aggregated logical trades |
+| Candle | 746,513 | OHLCV data (multi-timeframe) |
+| FundingRate | 79,756 | 8-hour funding epochs |
+| TechnicalIndicator | 97,036 | RSI, MACD, BB, EMA, ATR |
+| FeatureSnapshot | - | ML training data |
+| Prediction | - | Shadow mode validation |
+| AnalysisReport | 8+ | Saved analysis results |
 
 ---
 
@@ -206,104 +273,41 @@ Top 10 Assets Traded:
 
 ```
 src/
-├── index.ts                              # Express server + global error handlers
+├── index.ts                              # Express server
 ├── service/
-│   ├── Vault3.ts                         # Orchestrator (position polling scheduler)
+│   ├── Vault3.ts                         # Orchestrator
 │   ├── trade/
-│   │   ├── CopyTradingManager.ts         # Position-based syncing + WebSocket
-│   │   └── HyperliquidConnector.ts       # Exchange API integration
+│   │   ├── CopyTradingManager.ts         # Position-based syncing
+│   │   └── HyperliquidConnector.ts       # Exchange API
 │   ├── data/
-│   │   └── StartupSync.ts                # Startup fill synchronization
+│   │   └── StartupSync.ts                # Startup synchronization
+│   ├── ml/
+│   │   ├── FeatureEngine.ts              # 50+ ML features
+│   │   └── PredictionEngine.ts           # Pattern-matching predictor
 │   └── utils/
-│       └── logger.ts                     # Logging
-├── prisma/
-│   └── schema.prisma                     # Database schema
-└── scripts/
-    ├── backfill-target-vault.ts          # API-based backfill (limited)
-    └── import-csv-fills.ts               # CSV import (complete history)
-```
+│       ├── logger.ts                     # Logging
+│       └── indicators.ts                 # Technical indicators
 
----
+scripts/
+├── backfill-candles.ts                   # Historical candles
+├── backfill-funding.ts                   # Historical funding
+├── enrich-trades.ts                      # Market context enrichment
+├── calculate-indicators.ts              # Technical indicator calculation
+├── aggregate-pnl.ts                      # P&L aggregation
+├── analysis/
+│   ├── trading-patterns.ts
+│   ├── performance-metrics.ts
+│   ├── market-correlation.ts
+│   ├── twap-analysis.ts
+│   ├── entry-signals.ts
+│   ├── exit-signals.ts
+│   ├── position-sizing.ts
+│   └── risk-management.ts
+└── ml/
+    ├── prepare-training-data.ts          # Training data generation
+    └── run-predictions.ts                # Live predictions
 
-## Environment Configuration
-
-**Key Settings:**
-
-```bash
-# Copytrading
-COPY_TRADER=0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3
-COPY_MODE=scaled
-COPY_POLL_INTERVAL_MINUTES=5        # 5 minutes (default)
-
-# Phase Control
-ENABLE_COPY_TRADING=true            # ✅ Copytrading enabled
-
-# Risk Management
-MIN_POSITION_SIZE_USD=5             # Minimum margin required ($5)
-                                    # Note: Exchange also enforces $10 min position value
-POSITION_ADJUST_THRESHOLD=0.1       # Rebalance if position differs by >10% (0.1 = 10%)
-
-# Database
-# For Cloud Run (Unix socket):
-DATABASE_URL=postgresql://vault3user:pass@/vault3?host=/cloudsql/PROJECT:REGION:INSTANCE
-# For local development (public IP):
-DATABASE_URL=postgresql://vault3user:pass@IP:5432/vault3?sslmode=no-verify
-```
-
-**Removed Limits** (exact replication):
-- ~~COPY_TICKERS~~ - Auto-discovers all positions
-- ~~TICKERS~~ - Dynamic asset metadata from Hyperliquid API
-- ~~MAX_LEVERAGE~~ - Matches target exactly
-- ~~MAX_POSITION_PERCENT~~ - No position size limits
-- ~~DISABLE_ALGO_STRATEGY~~ - Legacy algo strategy removed
-
----
-
-## Monitoring
-
-### Startup Logs
-
-```
-🚀 Vault-3 Initializing...
-   Copy Trading: ✅ ENABLED
-   Copy Poll Interval: 5 minutes
-
-🔄 Starting startup sync...
-✅ Startup sync complete
-🔄 Running initial position scan...
-📊 Copy Trading Scan (Scale: 12.5%)
-✅ Copytrading system started
-🔌 COPY TRADING: WebSocket connected
-👀 Watching target vault: 0x4cb5...
-```
-
-### Position Scan (Every 5 minutes)
-
-```
-⏰ [2026-01-25T10:00:00.000Z] Running scheduled position scan...
-📊 Copy Trading Scan (Scale: 12.5%)
-🔍 Checking 8 symbols (7 target, 3 ours)
-```
-
-### Trade Execution
-
-```
-🔄 BTC: OPEN (Target: long 40x, Ours: none)
-📋 BTC: Using dynamic config (id: 0, leverage: 40x, decimals: 5)
-💰 BTC: Position value $1,234.56, Leverage 40x
-📝 BTC: Submitting order - BUY 0.03000 @ 41234.56 (market: 40825.00)
-   Position value: $1,224.75 @ 40x = $30.62 margin
-✅ BTC: open executed successfully
-💾 BTC: Trade logged (latency: 1245ms, leverage: 40x)
-```
-
-### WebSocket Health
-
-```
-💓 WebSocket healthy (last message 45s ago)
-❌ COPY TRADING: WebSocket disconnected
-🔄 Reconnecting in 4.0s (attempt 2)...
-🔌 COPY TRADING: WebSocket connected
+reports/                                   # Generated JSON reports
 ```
 
 ---
@@ -317,16 +321,56 @@ npm run dev             # Development (auto-restart)
 
 # Database
 npx prisma studio       # Web UI
-npx prisma migrate status
+npx prisma generate     # Regenerate client
+npx prisma db push      # Push schema changes
 
-# Import data
-npm run import-csv ./export/trade_history.csv
-npm run backfill        # API (limited to 2000 fills)
+# Data Collection
+npm run backfill:candles           # Historical candles
+npm run backfill:funding           # Historical funding rates
+npm run enrich:trades              # Enrich trades with context
+npm run calculate:indicators       # Calculate technical indicators
+npm run aggregate:pnl              # Aggregate P&L from fills
+
+# Strategy Analysis
+npm run analysis:patterns          # Trading patterns
+npm run analysis:performance       # Performance metrics
+npm run analysis:correlation       # Market correlation
+npm run analysis:twap              # TWAP analysis
+npm run analysis:entry-signals     # Entry signals
+npm run analysis:exit-signals      # Exit signals
+npm run analysis:position-sizing   # Position sizing
+npm run analysis:risk              # Risk management
+npm run analysis:all               # Run all analyses
+
+# Machine Learning
+npm run ml:prepare                 # Prepare training data
+npm run ml:predict                 # Run live predictions
 
 # Deployment
 npm run docker-build
 npm run docker-tag
 npm run docker-push
+```
+
+---
+
+## Environment Configuration
+
+```bash
+# Copytrading
+COPY_TRADER=0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3
+COPY_MODE=scaled
+COPY_POLL_INTERVAL_MINUTES=5
+
+# Phase Control
+ENABLE_COPY_TRADING=true
+
+# Risk Management
+MIN_POSITION_SIZE_USD=5
+POSITION_ADJUST_THRESHOLD=0.1
+
+# Database
+DATABASE_URL=postgresql://user:pass@host:5432/db
 ```
 
 ---
@@ -338,73 +382,68 @@ npm run docker-push
 - **Minimum margin:** $5 USD (configurable)
 - **Minimum position value:** $10 USD (exchange requirement)
 - **Position scaling:** Proportional to vault size ratio
-- **Leverage matching:** Exact replication (no artificial limits)
-- **TWAP resilience:** Position-based syncing (not fill-based)
-- **Database health:** Auto-reconnect on connection failures
-- **Error recovery:** Global handlers prevent scheduler crashes
+- **Leverage matching:** Exact replication
+- **TWAP resilience:** Position-based syncing
+- **Database health:** Auto-reconnect on failures
+- **Error recovery:** Global handlers prevent crashes
 - **Slippage control:** 1% for market orders
 
 ### Manual Controls
 
-- `MIN_POSITION_SIZE_USD` - Increase to avoid small positions (default: $5)
-- `COPY_POLL_INTERVAL_MINUTES` - Adjust scan frequency (default: 5 minutes)
+- `MIN_POSITION_SIZE_USD` - Increase to avoid small positions
+- `COPY_POLL_INTERVAL_MINUTES` - Adjust scan frequency
 - `ENABLE_COPY_TRADING=false` - Emergency stop
-
----
-
-## Phase 2 Goals
-
-**Transition Timeline**: Months 6-12
-
-1. **Independent Strategy Development**
-   - Analyze 6+ months of copytrading data
-   - Reverse-engineer target vault's strategy
-   - Build predictive models (70%+ accuracy)
-
-2. **Hybrid Execution**
-   - 80% copy + 20% independent → gradual transition
-   - A/B testing on small capital
-   - Performance attribution
-
-3. **Full Autonomy**
-   - 100% independent trading
-   - Sharpe ratio ≥ 1.5
-   - Max drawdown ≤ 20%
 
 ---
 
 ## Changelog
 
-### 2026-01-25 - Position Rebalancing & Production Hardening
+### 2026-01-27 - Prediction Engine & Analysis Complete
 
-- ✅ Implemented position size rebalancing (increase AND decrease)
-- ✅ Configurable adjustment threshold (default 10%)
-- ✅ Fixed critical resource leaks (HTTP client singleton pattern)
+- ✅ Fixed leverage data (fetched from API, set unknown to NULL)
+- ✅ Aggregated P&L from fills to trades ($448K total)
+- ✅ Calculated technical indicators (97K records)
+- ✅ Created PredictionEngine with pattern-matching
+- ✅ Added ML scripts (prepare-training-data, run-predictions)
+- ✅ Completed all 8 analysis scripts with real data
+
+### 2026-01-26 - Strategy Analysis & ML Foundation
+
+- ✅ Added candle backfill (746K candles, 4 timeframes)
+- ✅ Added funding rate backfill (80K records)
+- ✅ Trade enrichment with BTC/ETH/funding context
+- ✅ Created 8 analysis scripts
+- ✅ Implemented technical indicators utility
+- ✅ Created FeatureEngine (50+ features)
+- ✅ Added new database models
+
+### 2026-01-25 - Production Hardening
+
+- ✅ Position rebalancing (increase AND decrease)
+- ✅ Fixed resource leaks (HTTP client singleton)
 - ✅ Fixed WebSocket event listener leak
-- ✅ Added database connection pool configuration
-
-### 2026-01-25 - API Optimization & Bug Fixes
-
-- ✅ Removed hardcoded TICKERS (dynamic asset metadata)
-- ✅ Fixed Cloud SQL connection for Cloud Run (Unix socket)
-- ✅ Fixed minimum position checks (margin vs. position value)
-- ✅ Reduced slippage to 1% (from 3%)
-- ✅ Changed scan interval to 5 minutes (from 10 minutes)
-- ✅ Added global error handlers to prevent crashes
-- ✅ Added database health checks with auto-reconnect
-- ✅ Removed legacy algo strategy code
-- ✅ Deployed to Google Cloud Run
+- ✅ Database connection pool configuration
 
 ### 2026-01-24 - Phase 1 Launch
 
 - ✅ Position-based copytrading operational
-- ✅ 6,083 fills imported (67 days of history)
-- ✅ 2,222 logical trades aggregated
-- ✅ TWAP detection working (35% of trades)
+- ✅ 6,083 fills imported
+- ✅ TWAP detection working (35%)
 - ✅ WebSocket with robust reconnection
-- ✅ Auto-discovery of all positions
-- ✅ Exact leverage matching (no limits)
 - ✅ Google Cloud SQL database
+
+---
+
+## Next Steps
+
+1. **Run training data preparation** (`npm run ml:prepare`)
+2. **Backtest predictions** against historical trades
+3. **Achieve 70%+ accuracy** in shadow mode
+4. **Integrate predictions** into live copytrading:
+   - Front-run high-confidence predictions
+   - Skip trades for worst-performing symbols
+   - Adjust position sizing based on confidence
+5. **Gradual transition** to independent trading
 
 ---
 
