@@ -189,7 +189,10 @@ export class HyperliquidConnector {
     }
 
     static positionSide(position) {
-        return Number(position.entryPx) > Number(position.liquidationPx) ? 'long' : 'short';
+        // szi is signed: positive = long, negative = short
+        const szi = Number(position.szi);
+        if (szi === 0) return 'none';
+        return szi > 0 ? 'long' : 'short';
     }
 
     static getClients() {

@@ -7,13 +7,7 @@
  * Predictions are stored in the Prediction table for validation.
  */
 
-import { PrismaClient } from '@prisma/client';
-import pg from 'pg';
-import { PrismaPg } from '@prisma/adapter-pg';
-
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+import { prisma } from '../utils/db';
 
 const TARGET_VAULT = '0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3';
 

@@ -8,19 +8,8 @@
  * 4. Track paper P&L for shadow mode validation
  */
 
-import { PrismaClient } from '@prisma/client';
-import pg from 'pg';
-import { PrismaPg } from '@prisma/adapter-pg';
+import { prisma } from '../utils/db';
 import { logger } from '../utils/logger';
-
-// Database connection
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 5,
-  idleTimeoutMillis: 30000,
-});
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // Pattern thresholds (from analysis)
 const PATTERNS = {

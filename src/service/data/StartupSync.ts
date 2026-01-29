@@ -1,18 +1,11 @@
 import * as hl from "@nktkas/hyperliquid";
-import { PrismaClient } from '@prisma/client';
-import pg from 'pg';
-import { PrismaPg } from '@prisma/adapter-pg';
 import dotenv from 'dotenv';
 import { logger } from '../utils/logger';
+import { prisma } from '../utils/db';
 
 dotenv.config();
 
 const COPY_TRADER = process.env.COPY_TRADER as `0x${string}`;
-
-// Database
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 /**
  * Startup sync - ensures database has all recent fills from target vault

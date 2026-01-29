@@ -1,5 +1,6 @@
 import express from 'express';
 import {Vault3} from "./service/Vault3";
+import { prisma } from './service/utils/db';
 
 const app = express();
 const cors = require('cors');
@@ -21,11 +22,7 @@ process.on('uncaughtException', (error) => {
 const shutdown = async (signal: string) => {
     console.log(`👋 ${signal} received, shutting down gracefully...`);
     try {
-        // Import prisma to disconnect
-        const { PrismaClient } = require('@prisma/client');
-        const prisma = new PrismaClient();
-
-        // Disconnect database
+        // Disconnect shared database connection
         await Promise.race([
             prisma.$disconnect(),
             new Promise(resolve => setTimeout(resolve, 3000))

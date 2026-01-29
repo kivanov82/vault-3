@@ -1,24 +1,13 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
-**Project Status:** Phase 1 Complete + Strategy Analysis + Prediction Engine
-**Last Updated:** 2026-01-27
+**Project Status:** Phase 1 Complete + Live Shadow Mode Prediction System
+**Last Updated:** 2026-01-28
 
 ---
 
 ## Current State
 
-✅ **Fully operational copytrading bot** with comprehensive strategy analysis and prediction capabilities.
-
-### Data Summary
-
-| Metric | Value |
-|--------|-------|
-| Historical Fills | 18,842 |
-| Logical Trades | 2,297 |
-| Candles | 746,513 |
-| Funding Records | 79,756 |
-| Technical Indicators | 97,036 |
-| Date Range | Nov 17, 2025 - Jan 25, 2026 (69 days) |
+✅ **Fully operational copytrading bot** with integrated live prediction/shadow mode system.
 
 ### Configuration
 
@@ -33,179 +22,59 @@
 
 ---
 
-## Strategy Analysis Results
+## Shadow Mode Prediction System
 
-### Performance Summary (69 days)
+The bot now runs predictions alongside copy trading to learn and validate before influencing trades.
 
-| Metric | Value |
-|--------|-------|
-| **Total P&L** | **$448,194** |
-| Win Rate | 43% |
-| Avg Win | $878 |
-| Avg Loss | $309 |
-| Win/Loss Ratio | 2.84x |
-| Profit Factor | 2.15 |
-| Sharpe Ratio | ~5.86 |
-| Max Drawdown | $45,284 |
+### How It Works
 
-### Top Performing Symbols
-
-| Symbol | Trades | Win Rate | P&L |
-|--------|--------|----------|-----|
-| PUMP | 84 | 81% | +$78,264 |
-| VVV | 167 | 38% | +$62,208 |
-| ETH | 52 | 52% | +$56,092 |
-| IP | 77 | 47% | +$54,192 |
-| kPEPE | 45 | 53% | +$37,273 |
-
-### Worst Performing Symbols
-
-| Symbol | Trades | Win Rate | P&L |
-|--------|--------|----------|-----|
-| XMR | 34 | 6% | -$14,854 |
-| AVNT | 125 | 18% | -$13,620 |
-| SKY | 124 | 38% | -$9,052 |
-| DYM | 15 | 0% | -$5,786 |
-| kBONK | 39 | 21% | -$5,260 |
-
-### Entry Signal Patterns
-
-- **RSI at Entry:** Longs avg 51, Shorts avg 39 (shorts enter lower)
-- **Mean Reversion Score:** 10.5% (not a strong mean reversion strategy)
-- **BB Position:** Winners enter at 42% BB, Losers at 35% BB
-- **MACD Trend Following:** 42% (slightly contrarian)
-
-### Position Sizing Patterns
-
-- **Avg Leverage:** 4.75x (median 3x)
-- **Leverage by Direction:** Shorts 6.4x, Longs 4.4x
-- **Leverage Distribution:** 82% use 2-5x, 18% use 5-10x
-- **Top 3 Symbols:** 47% of portfolio
-- **Kelly Suggestion:** 1-5% fractional Kelly
-
----
-
-## Prediction Engine
-
-### Architecture
-
-The prediction engine uses pattern matching based on historical analysis:
+Every 5 minutes (integrated into copy trading cycle):
 
 ```
-src/service/ml/
-├── PredictionEngine.ts    # Pattern-matching predictor
-└── FeatureEngine.ts       # 50+ feature generator
-
-scripts/ml/
-├── prepare-training-data.ts   # Creates labeled training data
-└── run-predictions.ts         # Runs live predictions
+1. Fetch target & our positions
+2. Update market data for active symbols
+3. 🔮 Run predictions BEFORE copy actions
+   - Score each symbol (0-100)
+   - Predict direction (long/short)
+   - Log with entry price
+4. Execute copy trades (unchanged behavior)
+5. Log actual action taken for each prediction
+6. Every ~hour: Validate paper P&L
 ```
-
-### Features Used (50+)
-
-**Price Features:**
-- Price change: 1h, 4h, 24h
-- Distance from EMA21, EMA50
-- Bollinger Band position (0-1)
-
-**Momentum:**
-- RSI(14)
-- MACD, MACD Signal, MACD Histogram
-
-**Volatility:**
-- ATR(14) as % of price
-- BB Width
-
-**Context:**
-- BTC change 1h, 24h
-- ETH change 1h
-- Funding rate
-
-**Time:**
-- Hour of day (0-23 UTC)
-- Day of week
-- Minutes to funding
-
-**Behavioral:**
-- Target trades last 24h
-- Target last trade side
 
 ### Prediction Scoring
 
 | Factor | Points | Condition |
 |--------|--------|-----------|
 | Symbol Quality | ±15 | Best/worst performer |
-| RSI Signal | ±20 | Oversold/overbought |
-| BB Position | ±10 | Near bands |
-| Volatility | ±10 | High ATR |
-| Active Hour | +10 | Peak trading hours |
-| Recent Activity | +10 | Target traded recently |
-| BTC Movement | ±5 | BTC moving >1% |
-| Funding Rate | ±5 | High funding |
+| RSI Signal | +15/+10 | Oversold/overbought |
+| BB Position | +10 | Near bands (< 0.2 or > 0.8) |
+| Volatility | +10 | High ATR (> 5%) |
+| Active Hour | +5 | Peak trading hours UTC |
+| BTC Movement | +5 | BTC moving > 1% |
+| Funding Rate | +5 | Extreme funding |
 
-**Prediction Threshold:** Score ≥ 65 = likely trade
+**Base score:** 50 | **High confidence:** ≥ 65
 
-### Usage
+### Paper Trading Validation
+
+After 1 hour, each prediction is validated:
+- Entry price vs exit price
+- Paper P&L calculated based on predicted direction
+- Tracks: Would this prediction have been profitable?
+
+### Monitoring
 
 ```bash
-# Run predictions on current market
-npm run ml:predict
-
-# Prepare training data (takes time)
-npm run ml:prepare
+npm run ml:stats    # View prediction performance
 ```
 
----
-
-## Roadmap
-
-### Phase 1: Copytrading ✅ Complete
-
-- [x] Position-based copytrading
-- [x] WebSocket monitoring with auto-reconnect
-- [x] TWAP detection & aggregation
-- [x] Position rebalancing (±10% threshold)
-- [x] Exact leverage matching
-
-### Phase 2: Data Collection ✅ Complete
-
-- [x] Historical candle backfill (746K+ candles)
-- [x] Multi-timeframe support (1h, 5m, 15m, 4h)
-- [x] Funding rate collection (80K+ records)
-- [x] Trade enrichment with market context
-- [x] Technical indicators (97K+ records)
-
-### Phase 3: Strategy Analysis ✅ Complete
-
-- [x] Trading patterns (hour/day/session)
-- [x] Performance metrics (win rate, Sharpe, P&L)
-- [x] Market correlation (BTC, funding)
-- [x] TWAP analysis
-- [x] Entry/exit signal detection
-- [x] Position sizing analysis
-- [x] Risk management analysis
-
-### Phase 4: Prediction Engine ✅ In Progress
-
-- [x] Feature engineering (50+ features)
-- [x] Pattern-matching predictor
-- [x] Prediction storage & validation
-- [ ] Training data preparation
-- [ ] Backtest predictions vs actual
-- [ ] Shadow mode validation (target: 70%+ accuracy)
-
-### Phase 5: Hybrid Execution (Planned)
-
-- [ ] Prediction-enhanced copytrading
-- [ ] Front-run high-confidence predictions
-- [ ] Skip low-confidence trades
-- [ ] A/B testing framework
-
-### Phase 6: Independent Trading (Planned)
-
-- [ ] 80% copy + 20% independent
-- [ ] Gradual transition based on accuracy
-- [ ] Full autonomy when Sharpe ≥ 1.5
+Shows:
+- Total predictions & accuracy
+- Paper P&L (total and average %)
+- Performance by confidence level
+- Performance by symbol
+- Recent predictions with outcomes
 
 ---
 
@@ -218,12 +87,15 @@ npm run ml:prepare
 1. Check database connection health (auto-reconnect if needed)
 2. Fetch all positions from target vault and our vault
 3. Calculate scale factor: `ourVaultSize / targetVaultSize`
-4. For each symbol:
+4. **Run predictions for all symbols** (shadow mode)
+5. For each symbol:
    - Compare target position vs. our position
    - Determine action: OPEN, CLOSE, FLIP, or ADJUST
    - Apply risk checks (min margin $5, min position $10)
    - Execute trade with exact leverage matching (1% slippage)
-   - Log to database with latency tracking
+   - **Log prediction outcome** (what action was actually taken)
+6. Finalize predictions for symbols with no action
+7. Periodically validate past predictions (paper P&L)
 
 **Position Actions:**
 - **OPEN**: Target has position, we don't → Open new position
@@ -231,41 +103,40 @@ npm run ml:prepare
 - **FLIP**: Target changed direction (long↔short) → Close + Open opposite
 - **ADJUST**: Same direction but size differs >10% → Increase or decrease
 
-### TWAP Detection
-
-Aggregates sequential fills into logical trades:
-
-```typescript
-if (
-  fill.symbol === previousFill.symbol &&
-  fill.side === previousFill.side &&
-  fill.timestamp - previousFill.timestamp < 5 minutes &&
-  isSameDirection(fill.szi, previousFill.szi)
-) {
-  aggregateTrade.addFill(fill);
-} else {
-  startNewAggregateTrade(fill);
-}
-```
-
-**Results**: 35% of trades detected as TWAP (773 out of 2,222).
-
 ---
 
 ## Database Schema
 
 ### Core Tables
 
-| Table | Records | Description |
-|-------|---------|-------------|
-| Fill | 18,842 | Raw fill events |
-| Trade | 2,297 | Aggregated logical trades |
-| Candle | 746,513 | OHLCV data (multi-timeframe) |
-| FundingRate | 79,756 | 8-hour funding epochs |
-| TechnicalIndicator | 97,036 | RSI, MACD, BB, EMA, ATR |
-| FeatureSnapshot | - | ML training data |
-| Prediction | - | Shadow mode validation |
-| AnalysisReport | 8+ | Saved analysis results |
+| Table | Description |
+|-------|-------------|
+| Fill | Raw fill events from exchange |
+| Trade | Aggregated logical trades (copy trades logged here) |
+| Candle | OHLCV data (multi-timeframe) |
+| FundingRate | 8-hour funding epochs |
+| TechnicalIndicator | RSI, MACD, BB, EMA, ATR |
+| Prediction | Shadow mode predictions with paper P&L |
+
+### Prediction Table Fields
+
+| Field | Description |
+|-------|-------------|
+| timestamp | When prediction was made |
+| symbol | Trading symbol |
+| prediction | Score (0-100) |
+| confidence | Normalized confidence (0-1) |
+| direction | Predicted direction: 1=long, -1=short |
+| reasons | Signals that triggered prediction |
+| entryPrice | Price when prediction was made |
+| exitPrice | Price at validation time |
+| paperPnl | Theoretical P&L if we acted |
+| paperPnlPct | P&L as percentage |
+| copyAction | What copy trading actually did |
+| copySide | Actual trade side |
+| copySize | Actual trade size |
+| correct | Was prediction correct? |
+| validatedAt | When validated |
 
 ---
 
@@ -277,37 +148,21 @@ src/
 ├── service/
 │   ├── Vault3.ts                         # Orchestrator
 │   ├── trade/
-│   │   ├── CopyTradingManager.ts         # Position-based syncing
+│   │   ├── CopyTradingManager.ts         # Position-based syncing + prediction integration
 │   │   └── HyperliquidConnector.ts       # Exchange API
 │   ├── data/
 │   │   └── StartupSync.ts                # Startup synchronization
 │   ├── ml/
-│   │   ├── FeatureEngine.ts              # 50+ ML features
-│   │   └── PredictionEngine.ts           # Pattern-matching predictor
+│   │   ├── PredictionLogger.ts           # Live prediction logging & validation
+│   │   ├── PredictionEngine.ts           # Pattern-matching predictor
+│   │   └── FeatureEngine.ts              # Feature generator
 │   └── utils/
 │       ├── logger.ts                     # Logging
 │       └── indicators.ts                 # Technical indicators
 
-scripts/
-├── backfill-candles.ts                   # Historical candles
-├── backfill-funding.ts                   # Historical funding
-├── enrich-trades.ts                      # Market context enrichment
-├── calculate-indicators.ts              # Technical indicator calculation
-├── aggregate-pnl.ts                      # P&L aggregation
-├── analysis/
-│   ├── trading-patterns.ts
-│   ├── performance-metrics.ts
-│   ├── market-correlation.ts
-│   ├── twap-analysis.ts
-│   ├── entry-signals.ts
-│   ├── exit-signals.ts
-│   ├── position-sizing.ts
-│   └── risk-management.ts
-└── ml/
-    ├── prepare-training-data.ts          # Training data generation
-    └── run-predictions.ts                # Live predictions
-
-reports/                                   # Generated JSON reports
+scripts/ml/
+├── run-predictions.ts                    # Manual prediction testing
+└── prediction-stats.ts                   # View prediction stats
 ```
 
 ---
@@ -324,27 +179,9 @@ npx prisma studio       # Web UI
 npx prisma generate     # Regenerate client
 npx prisma db push      # Push schema changes
 
-# Data Collection
-npm run backfill:candles           # Historical candles
-npm run backfill:funding           # Historical funding rates
-npm run enrich:trades              # Enrich trades with context
-npm run calculate:indicators       # Calculate technical indicators
-npm run aggregate:pnl              # Aggregate P&L from fills
-
-# Strategy Analysis
-npm run analysis:patterns          # Trading patterns
-npm run analysis:performance       # Performance metrics
-npm run analysis:correlation       # Market correlation
-npm run analysis:twap              # TWAP analysis
-npm run analysis:entry-signals     # Entry signals
-npm run analysis:exit-signals      # Exit signals
-npm run analysis:position-sizing   # Position sizing
-npm run analysis:risk              # Risk management
-npm run analysis:all               # Run all analyses
-
-# Machine Learning
-npm run ml:prepare                 # Prepare training data
-npm run ml:predict                 # Run live predictions
+# Prediction Monitoring
+npm run ml:stats        # View prediction performance
+npm run ml:predict      # Manual prediction test
 
 # Deployment
 npm run docker-build
@@ -383,10 +220,10 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 - **Minimum position value:** $10 USD (exchange requirement)
 - **Position scaling:** Proportional to vault size ratio
 - **Leverage matching:** Exact replication
-- **TWAP resilience:** Position-based syncing
 - **Database health:** Auto-reconnect on failures
 - **Error recovery:** Global handlers prevent crashes
 - **Slippage control:** 1% for market orders
+- **Shadow mode:** Predictions don't affect trades (observation only)
 
 ### Manual Controls
 
@@ -396,39 +233,70 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 
 ---
 
+## Roadmap
+
+### Phase 1: Copytrading ✅ Complete
+
+- [x] Position-based copytrading
+- [x] WebSocket monitoring with auto-reconnect
+- [x] Position rebalancing (±10% threshold)
+- [x] Exact leverage matching
+
+### Phase 2: Shadow Mode ✅ Complete
+
+- [x] Integrated prediction logging
+- [x] Paper trading validation
+- [x] Prediction stats monitoring
+- [x] Live data collection (candles, indicators, funding from copy trades)
+
+### Phase 3: Validate Predictions (Current)
+
+- [ ] Collect 2+ weeks of prediction data
+- [ ] Analyze prediction accuracy by symbol/confidence
+- [ ] Identify which signals are actually predictive
+- [ ] Target: 65-70% accuracy on high-confidence predictions
+
+### Phase 4: Prediction-Enhanced Copytrading (Planned)
+
+- [ ] Skip trades for consistently worst-performing symbols
+- [ ] Adjust position sizing based on confidence
+- [ ] Front-run high-confidence predictions
+- [ ] A/B testing framework
+
+### Phase 5: Hybrid/Independent Trading (Planned)
+
+- [ ] 80% copy + 20% independent
+- [ ] Gradual transition based on proven accuracy
+- [ ] Full autonomy when Sharpe ≥ 1.5
+
+---
+
 ## Changelog
 
-### 2026-01-27 - Prediction Engine & Analysis Complete
+### 2026-01-28 - Live Shadow Mode System
 
-- ✅ Fixed leverage data (fetched from API, set unknown to NULL)
-- ✅ Aggregated P&L from fills to trades ($448K total)
-- ✅ Calculated technical indicators (97K records)
+- ✅ Integrated PredictionLogger into CopyTradingManager
+- ✅ Predictions run BEFORE each copy cycle
+- ✅ Paper trading validation with P&L tracking
+- ✅ Added `npm run ml:stats` for monitoring
+- ✅ Cleaned up historical data scripts (now collecting live)
+- ✅ Updated Prediction schema for paper trading
+
+### 2026-01-27 - Prediction Engine & Analysis
+
 - ✅ Created PredictionEngine with pattern-matching
-- ✅ Added ML scripts (prepare-training-data, run-predictions)
-- ✅ Completed all 8 analysis scripts with real data
-
-### 2026-01-26 - Strategy Analysis & ML Foundation
-
-- ✅ Added candle backfill (746K candles, 4 timeframes)
-- ✅ Added funding rate backfill (80K records)
-- ✅ Trade enrichment with BTC/ETH/funding context
-- ✅ Created 8 analysis scripts
-- ✅ Implemented technical indicators utility
-- ✅ Created FeatureEngine (50+ features)
-- ✅ Added new database models
+- ✅ Backtested on historical data (identified low precision)
+- ✅ Completed strategy analysis (statistical profile)
 
 ### 2026-01-25 - Production Hardening
 
 - ✅ Position rebalancing (increase AND decrease)
 - ✅ Fixed resource leaks (HTTP client singleton)
-- ✅ Fixed WebSocket event listener leak
 - ✅ Database connection pool configuration
 
 ### 2026-01-24 - Phase 1 Launch
 
 - ✅ Position-based copytrading operational
-- ✅ 6,083 fills imported
-- ✅ TWAP detection working (35%)
 - ✅ WebSocket with robust reconnection
 - ✅ Google Cloud SQL database
 
@@ -436,14 +304,11 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 
 ## Next Steps
 
-1. **Run training data preparation** (`npm run ml:prepare`)
-2. **Backtest predictions** against historical trades
-3. **Achieve 70%+ accuracy** in shadow mode
-4. **Integrate predictions** into live copytrading:
-   - Front-run high-confidence predictions
-   - Skip trades for worst-performing symbols
-   - Adjust position sizing based on confidence
-5. **Gradual transition** to independent trading
+1. **Deploy** the updated bot with shadow mode
+2. **Monitor** predictions via `npm run ml:stats`
+3. **Collect data** for 2-4 weeks
+4. **Analyze** which predictions are accurate
+5. **Decide** whether to use predictions to enhance copy trading
 
 ---
 

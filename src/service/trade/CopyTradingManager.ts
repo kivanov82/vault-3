@@ -2,9 +2,7 @@ import dotenv from "dotenv";
 import * as hl from "@nktkas/hyperliquid";
 import {HyperliquidConnector} from "./HyperliquidConnector";
 import {logger} from "../utils/logger";
-import { PrismaClient } from '@prisma/client';
-import pg from 'pg';
-import { PrismaPg } from '@prisma/adapter-pg';
+import { prisma } from '../utils/db';
 import { PredictionLogger } from '../ml/PredictionLogger';
 
 dotenv.config(); // Load environment variables
@@ -19,15 +17,8 @@ const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5
 // Position adjustment threshold (e.g., 0.1 = 10% difference triggers rebalance)
 const POSITION_ADJUST_THRESHOLD = parseFloat(process.env.POSITION_ADJUST_THRESHOLD || '0.1');
 
-// Database with connection pool limits
-const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 10, // Maximum connections in pool
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
-});
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+// Scale multiplier for copy positions (1.2 = 20% larger than proportional)
+const COPY_SCALE_MULTIPLIER = parseFloat(process.env.COPY_SCALE_MULTIPLIER || '1.2');
 
 // Track last scan time for latency calculation
 const tradeStartTimes = new Map<string, number>();
@@ -202,9 +193,9 @@ export class CopyTradingManager {
                 HyperliquidConnector.getMarkets(), // Fetch ALL markets once
             ]);
 
-            // Calculate scaling factor based on vault sizes
+            // Calculate scaling factor based on vault sizes (with multiplier)
             const scaleFactor = COPY_MODE === 'exact' ? 1.0 :
-                                (ourPortfolio.portfolio / targetPortfolio.portfolio);
+                                (ourPortfolio.portfolio / targetPortfolio.portfolio) * COPY_SCALE_MULTIPLIER;
 
             // Get all symbols that target trader has positions in
             const targetSymbols = targetPositions.assetPositions
