@@ -12,7 +12,11 @@
     "gcloud-auth": "gcloud auth login",
     "docker-push": "docker push gcr.io/bright-union/vault-3",
     "ml:predict": "ts-node scripts/ml/run-predictions.ts",
-    "ml:stats": "ts-node scripts/ml/prediction-stats.ts"
+    "ml:stats": "ts-node scripts/ml/prediction-stats.ts",
+    "ml:strategy": "ts-node scripts/ml/strategy-analysis.ts",
+    "ml:deep": "ts-node scripts/ml/deep-strategy-analysis.ts",
+    "ml:save-report": "ts-node scripts/ml/save-strategy-report.ts",
+    "ml:cleanup": "ts-node scripts/ml/cleanup-predictions.ts"
   },
   "author": "",
   "license": "ISC",

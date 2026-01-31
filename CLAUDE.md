@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
-**Project Status:** Phase 1 Complete + Live Shadow Mode Prediction System
-**Last Updated:** 2026-01-28
+**Project Status:** Phase 1 Complete + Momentum-Based Prediction System (v2)
+**Last Updated:** 2026-01-31
 
 ---
 
@@ -22,9 +22,36 @@
 
 ---
 
-## Shadow Mode Prediction System
+## Target Vault Strategy Profile
 
-The bot now runs predictions alongside copy trading to learn and validate before influencing trades.
+Based on analysis of 75 days of data (20,787 fills, 71 symbols):
+
+### Strategy Type: Momentum/Breakout Accumulator
+
+| Characteristic | Detail |
+|----------------|--------|
+| Entry Style | Breakout buying (65% at upper price range) |
+| Execution | TWAP accumulation (avg 9.5 consecutive fills) |
+| Leverage | Conservative (avg 4.8x) |
+| BTC Behavior | Trade alts when BTC calm, same direction (77% correlation) |
+| Session Pattern | Accumulate Asia/EU (89%/78% buys), trim US (65%) |
+| Directional Bias | Long-heavy (64%) |
+| Focus Assets | Memecoins/altcoins (HYPE, VVV, SPX, FARTCOIN, MON) |
+
+### Entry Behavior by Symbol
+
+| Symbol | Breakout Buys | Dip Buys |
+|--------|--------------|----------|
+| HYPE   | 65%          | 35%      |
+| BTC    | 69%          | 31%      |
+| VVV    | 56%          | 44%      |
+| SKY    | 55%          | 45%      |
+
+---
+
+## Shadow Mode Prediction System (v2 - Momentum)
+
+The bot runs predictions alongside copy trading using signals aligned with target vault behavior.
 
 ### How It Works
 
@@ -33,48 +60,54 @@ Every 5 minutes (integrated into copy trading cycle):
 ```
 1. Fetch target & our positions
 2. Update market data for active symbols
-3. 🔮 Run predictions BEFORE copy actions
+3. 🔮 Run momentum-based predictions BEFORE copy actions
    - Score each symbol (0-100)
-   - Predict direction (long/short)
+   - Predict direction (long/short) based on momentum signals
    - Log with entry price
 4. Execute copy trades (unchanged behavior)
 5. Log actual action taken for each prediction
-6. Every ~hour: Validate paper P&L
+6. Every 4 hours: Validate paper P&L (longer window for momentum strategy)
 ```
 
-### Prediction Scoring
+### Prediction Scoring (Momentum v2)
 
 | Factor | Points | Condition |
 |--------|--------|-----------|
-| Symbol Quality | ±15 | Best/worst performer |
-| RSI Signal | +15/+10 | Oversold/overbought |
-| BB Position | +10 | Near bands (< 0.2 or > 0.8) |
-| Volatility | +10 | High ATR (> 5%) |
-| Active Hour | +5 | Peak trading hours UTC |
-| BTC Movement | +5 | BTC moving > 1% |
-| Funding Rate | +5 | Extreme funding |
+| Breakout | +20 | Price in upper 30% of recent range |
+| Momentum Up | +15 | 1h price change > 0.5% |
+| Trend Confirmation | +10 | 4h price change > 1% |
+| BTC Calm | +10 | BTC move < 1% (they trade more when BTC stable) |
+| Session Bias | +3 to +10 | Asia (+10), EU (+8), US (+3) |
+| Top Symbol | +10 | HYPE, VVV, SKY, MON, SPX, FARTCOIN, PUMP |
+| Basket Symbol | +5 | Correlated memecoins traded together |
+| MACD Bullish | +5 | MACD histogram > 0 |
+| High Volatility | +5 | ATR > 5% |
+| Dip Buy | +5 | Price in lower 30% (they still buy some dips) |
 
-**Base score:** 50 | **High confidence:** ≥ 65
+**Base score:** 50 | **High confidence:** ≥ 65 | **Validation window:** 4 hours
 
 ### Paper Trading Validation
 
-After 1 hour, each prediction is validated:
+After 4 hours (target holds positions longer), each prediction is validated:
 - Entry price vs exit price
 - Paper P&L calculated based on predicted direction
-- Tracks: Would this prediction have been profitable?
+- Direction correctness tracked separately from P&L
 
 ### Monitoring
 
 ```bash
-npm run ml:stats    # View prediction performance
+npm run ml:stats       # View prediction performance (momentum-v2)
+npm run ml:strategy    # Full strategy analysis
+npm run ml:deep        # Deep behavioral analysis
 ```
 
 Shows:
 - Total predictions & accuracy
 - Paper P&L (total and average %)
 - Performance by confidence level
-- Performance by symbol
-- Recent predictions with outcomes
+- Performance by direction (long/short)
+- Signal frequency analysis
+- Recent predictions with signals
 
 ---
 
@@ -162,7 +195,11 @@ src/
 
 scripts/ml/
 ├── run-predictions.ts                    # Manual prediction testing
-└── prediction-stats.ts                   # View prediction stats
+├── prediction-stats.ts                   # View prediction stats (momentum-v2)
+├── strategy-analysis.ts                  # Basic strategy analysis
+├── deep-strategy-analysis.ts             # Deep behavioral analysis
+├── save-strategy-report.ts               # Save analysis to DB
+└── cleanup-predictions.ts                # Archive old predictions
 ```
 
 ---
@@ -180,8 +217,12 @@ npx prisma generate     # Regenerate client
 npx prisma db push      # Push schema changes
 
 # Prediction Monitoring
-npm run ml:stats        # View prediction performance
+npm run ml:stats        # View prediction performance (momentum-v2)
 npm run ml:predict      # Manual prediction test
+npm run ml:strategy     # Full strategy analysis
+npm run ml:deep         # Deep behavioral analysis
+npm run ml:save-report  # Save analysis report to DB
+npm run ml:cleanup      # Archive old predictions
 
 # Deployment
 npm run docker-build
@@ -249,12 +290,15 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 - [x] Prediction stats monitoring
 - [x] Live data collection (candles, indicators, funding from copy trades)
 
-### Phase 3: Validate Predictions (Current)
+### Phase 3: Strategy Analysis & Prediction Refinement (Current)
 
-- [ ] Collect 2+ weeks of prediction data
-- [ ] Analyze prediction accuracy by symbol/confidence
-- [ ] Identify which signals are actually predictive
-- [ ] Target: 65-70% accuracy on high-confidence predictions
+- [x] Comprehensive target vault analysis (75 days, 20K+ fills)
+- [x] Identified strategy: Momentum/breakout accumulator
+- [x] Rewrote predictions with momentum signals (v2)
+- [ ] Collect 2+ weeks of momentum-v2 prediction data
+- [ ] Validate prediction accuracy by symbol/confidence
+- [ ] Refine signal weights based on accuracy
+- [ ] Target: 55-60% direction accuracy on high-confidence predictions
 
 ### Phase 4: Prediction-Enhanced Copytrading (Planned)
 
@@ -272,6 +316,17 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 ---
 
 ## Changelog
+
+### 2026-01-31 - Momentum Strategy v2
+
+- ✅ Comprehensive target vault strategy analysis (75 days, 20K+ fills)
+- ✅ Identified: Momentum/breakout accumulator strategy (not mean reversion)
+- ✅ Key findings: 65% breakout buys, 77% BTC correlation, session-based accumulation
+- ✅ Rewrote PredictionLogger with momentum-based signals (v2)
+- ✅ Extended validation window from 1h to 4h (matches target hold patterns)
+- ✅ Cleaned up old predictions (6,841 deleted, archived to AnalysisReport)
+- ✅ Added analysis scripts: strategy, deep, save-report, cleanup
+- ✅ Strategy report saved to DB for future reference
 
 ### 2026-01-28 - Live Shadow Mode System
 
@@ -304,11 +359,13 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 
 ## Next Steps
 
-1. **Deploy** the updated bot with shadow mode
+1. **Deploy** the updated bot with momentum-v2 predictions
 2. **Monitor** predictions via `npm run ml:stats`
-3. **Collect data** for 2-4 weeks
-4. **Analyze** which predictions are accurate
-5. **Decide** whether to use predictions to enhance copy trading
+3. **Collect data** for 2-4 weeks with new strategy
+4. **Validate** that momentum signals better match target behavior
+5. **Analyze** which specific signals are most predictive
+6. **Refine** scoring weights based on accuracy data
+7. **Consider** using predictions to filter/enhance copy trades
 
 ---
 
