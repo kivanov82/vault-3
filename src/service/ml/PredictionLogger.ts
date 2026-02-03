@@ -256,6 +256,20 @@ function calculatePricePosition(candles: { close: number; high: number; low: num
 
 export class PredictionLogger {
   /**
+   * Get current scan predictions for IndependentTrader
+   */
+  static getCurrentPredictions(): Map<string, {
+    id: string;
+    symbol: string;
+    score: number;
+    direction: number | null;
+    reasons: string[];
+    entryPrice: number;
+  }> {
+    return currentScanPredictions;
+  }
+
+  /**
    * Run predictions for all symbols BEFORE copy trading executes
    * Called at the start of each scan cycle
    */

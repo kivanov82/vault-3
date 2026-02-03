@@ -1,13 +1,13 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
-**Project Status:** Phase 1 Complete + Momentum-Based Prediction System (v2)
-**Last Updated:** 2026-01-31
+**Project Status:** Phase 4 - Independent Trading System
+**Last Updated:** 2026-02-03
 
 ---
 
 ## Current State
 
-✅ **Fully operational copytrading bot** with integrated live prediction/shadow mode system.
+✅ **Fully operational copytrading bot** with integrated prediction system and autonomous trading capability.
 
 ### Configuration
 
@@ -49,6 +49,53 @@ Based on analysis of 75 days of data (20,787 fills, 71 symbols):
 
 ---
 
+## Independent Trading System
+
+Autonomous trading based on high-confidence prediction signals, running alongside copy trading.
+
+### How It Works
+
+```
+Signal Detection (score ≥ 80, LONG only, whitelist symbol)
+    ↓
+  OPEN position → Check every 5 min:
+    ├─ Target confirmed same direction? → Hand to copy trading
+    ├─ Target opened opposite? → Close immediately
+    ├─ Price ≥ TP (+8%)? → Close with profit
+    ├─ Price ≤ SL (-4%)? → Close with loss
+    └─ Time ≥ 24h? → Close at market (timeout)
+```
+
+### Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Max allocation | 3% of vault | ~$34 at current vault size |
+| Max positions | 3 concurrent | ~1% each |
+| Min score | 80 | Very high confidence only |
+| Direction | LONG only | Shorts have 0% historical win rate |
+| Leverage | 5x | Matches target avg (4.8x rounded) |
+| Take Profit | +8% | Lock in gains |
+| Stop Loss | -4% | 2:1 risk/reward ratio |
+| Timeout | 24 hours | Max hold time |
+| Whitelist | VVV, AXS, IP, LDO, AAVE, XMR, GRASS, SKY, ZORA | 100% win rate symbols |
+
+### Conflict Resolution
+
+| Scenario | Action |
+|----------|--------|
+| Target opens same position | Mark confirmed, copy trading takes over sizing |
+| Target opens opposite | Close independent position immediately |
+| Copy wants to close unconfirmed | Skip - let independent TP/SL/timeout manage |
+
+### Monitoring
+
+```bash
+npm run ml:independent-stats   # View independent trading performance
+```
+
+---
+
 ## Shadow Mode Prediction System (v2 - Momentum)
 
 The bot runs predictions alongside copy trading using signals aligned with target vault behavior.
@@ -64,9 +111,10 @@ Every 5 minutes (integrated into copy trading cycle):
    - Score each symbol (0-100)
    - Predict direction (long/short) based on momentum signals
    - Log with entry price
-4. Execute copy trades (unchanged behavior)
-5. Log actual action taken for each prediction
-6. Every 4 hours: Validate paper P&L (longer window for momentum strategy)
+4. 🎯 Process independent trading signals (if enabled)
+5. Execute copy trades (unchanged behavior)
+6. Log actual action taken for each prediction
+7. Every 4 hours: Validate paper P&L (longer window for momentum strategy)
 ```
 
 ### Prediction Scoring (Momentum v2)
@@ -84,7 +132,7 @@ Every 5 minutes (integrated into copy trading cycle):
 | High Volatility | +5 | ATR > 5% |
 | Dip Buy | +5 | Price in lower 30% (they still buy some dips) |
 
-**Base score:** 50 | **High confidence:** ≥ 65 | **Validation window:** 4 hours
+**Base score:** 50 | **High confidence:** ≥ 65 | **Independent threshold:** ≥ 80
 
 ### Paper Trading Validation
 
@@ -101,14 +149,6 @@ npm run ml:strategy    # Full strategy analysis
 npm run ml:deep        # Deep behavioral analysis
 ```
 
-Shows:
-- Total predictions & accuracy
-- Paper P&L (total and average %)
-- Performance by confidence level
-- Performance by direction (long/short)
-- Signal frequency analysis
-- Recent predictions with signals
-
 ---
 
 ## Technical Implementation
@@ -121,18 +161,21 @@ Shows:
 2. Fetch all positions from target vault and our vault
 3. Calculate scale factor: `ourVaultSize / targetVaultSize`
 4. **Run predictions for all symbols** (shadow mode)
-5. For each symbol:
+5. **Process independent trading signals** (if enabled)
+6. **Manage independent positions** (TP/SL/timeout checks)
+7. For each symbol:
    - Compare target position vs. our position
+   - Check for independent position conflicts
    - Determine action: OPEN, CLOSE, FLIP, or ADJUST
    - Apply risk checks (min margin $5, min position $10)
    - Execute trade with exact leverage matching (1% slippage)
    - **Log prediction outcome** (what action was actually taken)
-6. Finalize predictions for symbols with no action
-7. Periodically validate past predictions (paper P&L)
+8. Finalize predictions for symbols with no action
+9. Periodically validate past predictions (paper P&L)
 
 **Position Actions:**
 - **OPEN**: Target has position, we don't → Open new position
-- **CLOSE**: Target closed, we still have position → Close position
+- **CLOSE**: Target closed, we still have position → Close position (unless unconfirmed independent)
 - **FLIP**: Target changed direction (long↔short) → Close + Open opposite
 - **ADJUST**: Same direction but size differs >10% → Increase or decrease
 
@@ -150,26 +193,29 @@ Shows:
 | FundingRate | 8-hour funding epochs |
 | TechnicalIndicator | RSI, MACD, BB, EMA, ATR |
 | Prediction | Shadow mode predictions with paper P&L |
+| IndependentPosition | Autonomous trading positions |
 
-### Prediction Table Fields
+### IndependentPosition Table Fields
 
 | Field | Description |
 |-------|-------------|
-| timestamp | When prediction was made |
 | symbol | Trading symbol |
-| prediction | Score (0-100) |
-| confidence | Normalized confidence (0-1) |
-| direction | Predicted direction: 1=long, -1=short |
-| reasons | Signals that triggered prediction |
-| entryPrice | Price when prediction was made |
-| exitPrice | Price at validation time |
-| paperPnl | Theoretical P&L if we acted |
-| paperPnlPct | P&L as percentage |
-| copyAction | What copy trading actually did |
-| copySide | Actual trade side |
-| copySize | Actual trade size |
-| correct | Was prediction correct? |
-| validatedAt | When validated |
+| side | Position side ('long') |
+| entryPrice | Entry price |
+| size | Position size in asset units |
+| sizeUsd | Position size in USD |
+| leverage | Leverage used |
+| tpPrice | Take profit price (entry * 1.08) |
+| slPrice | Stop loss price (entry * 0.96) |
+| timeoutAt | Max hold time (+24h from entry) |
+| status | open, confirmed, closed |
+| confirmedByTarget | Whether target opened same position |
+| exitPrice | Exit price (when closed) |
+| exitReason | tp, sl, timeout, target_confirmed, target_opposite |
+| realizedPnl | Actual P&L in USD |
+| realizedPnlPct | P&L as percentage |
+| predictionScore | Score that triggered entry |
+| predictionReasons | Signals that triggered entry |
 
 ---
 
@@ -182,6 +228,7 @@ src/
 │   ├── Vault3.ts                         # Orchestrator
 │   ├── trade/
 │   │   ├── CopyTradingManager.ts         # Position-based syncing + prediction integration
+│   │   ├── IndependentTrader.ts          # Autonomous trading module
 │   │   └── HyperliquidConnector.ts       # Exchange API
 │   ├── data/
 │   │   └── StartupSync.ts                # Startup synchronization
@@ -196,6 +243,7 @@ src/
 scripts/ml/
 ├── run-predictions.ts                    # Manual prediction testing
 ├── prediction-stats.ts                   # View prediction stats (momentum-v2)
+├── independent-stats.ts                  # View independent trading stats
 ├── strategy-analysis.ts                  # Basic strategy analysis
 ├── deep-strategy-analysis.ts             # Deep behavioral analysis
 ├── save-strategy-report.ts               # Save analysis to DB
@@ -217,12 +265,13 @@ npx prisma generate     # Regenerate client
 npx prisma db push      # Push schema changes
 
 # Prediction Monitoring
-npm run ml:stats        # View prediction performance (momentum-v2)
-npm run ml:predict      # Manual prediction test
-npm run ml:strategy     # Full strategy analysis
-npm run ml:deep         # Deep behavioral analysis
-npm run ml:save-report  # Save analysis report to DB
-npm run ml:cleanup      # Archive old predictions
+npm run ml:stats              # View prediction performance (momentum-v2)
+npm run ml:independent-stats  # View independent trading stats
+npm run ml:predict            # Manual prediction test
+npm run ml:strategy           # Full strategy analysis
+npm run ml:deep               # Deep behavioral analysis
+npm run ml:save-report        # Save analysis report to DB
+npm run ml:cleanup            # Archive old predictions
 
 # Deployment
 npm run docker-build
@@ -242,6 +291,15 @@ COPY_POLL_INTERVAL_MINUTES=5
 
 # Phase Control
 ENABLE_COPY_TRADING=true
+ENABLE_INDEPENDENT_TRADING=false  # Set to true to enable autonomous trading
+
+# Independent Trading
+INDEPENDENT_MAX_ALLOCATION_PCT=0.03   # 3% of vault
+INDEPENDENT_MAX_POSITIONS=3           # Max concurrent positions
+INDEPENDENT_LEVERAGE=5                # 5x leverage
+INDEPENDENT_TP_PCT=0.08               # +8% take profit
+INDEPENDENT_SL_PCT=0.04               # -4% stop loss
+INDEPENDENT_TIMEOUT_HOURS=24          # 24h max hold
 
 # Risk Management
 MIN_POSITION_SIZE_USD=5
@@ -260,17 +318,19 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 - **Minimum margin:** $5 USD (configurable)
 - **Minimum position value:** $10 USD (exchange requirement)
 - **Position scaling:** Proportional to vault size ratio
-- **Leverage matching:** Exact replication
+- **Leverage matching:** Exact replication for copy trades
 - **Database health:** Auto-reconnect on failures
 - **Error recovery:** Global handlers prevent crashes
 - **Slippage control:** 1% for market orders
-- **Shadow mode:** Predictions don't affect trades (observation only)
+- **Independent allocation cap:** Max 3% of vault for autonomous trades
+- **TP/SL management:** Automatic exit on independent positions
 
 ### Manual Controls
 
 - `MIN_POSITION_SIZE_USD` - Increase to avoid small positions
 - `COPY_POLL_INTERVAL_MINUTES` - Adjust scan frequency
-- `ENABLE_COPY_TRADING=false` - Emergency stop
+- `ENABLE_COPY_TRADING=false` - Emergency stop for copy trading
+- `ENABLE_INDEPENDENT_TRADING=false` - Disable autonomous trading
 
 ---
 
@@ -279,7 +339,6 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 ### Phase 1: Copytrading ✅ Complete
 
 - [x] Position-based copytrading
-- [x] WebSocket monitoring with auto-reconnect
 - [x] Position rebalancing (±10% threshold)
 - [x] Exact leverage matching
 
@@ -290,32 +349,45 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 - [x] Prediction stats monitoring
 - [x] Live data collection (candles, indicators, funding from copy trades)
 
-### Phase 3: Strategy Analysis & Prediction Refinement (Current)
+### Phase 3: Strategy Analysis & Prediction Refinement ✅ Complete
 
 - [x] Comprehensive target vault analysis (75 days, 20K+ fills)
 - [x] Identified strategy: Momentum/breakout accumulator
 - [x] Rewrote predictions with momentum signals (v2)
-- [ ] Collect 2+ weeks of momentum-v2 prediction data
-- [ ] Validate prediction accuracy by symbol/confidence
-- [ ] Refine signal weights based on accuracy
-- [ ] Target: 55-60% direction accuracy on high-confidence predictions
+- [x] Momentum-v2 prediction data collection
 
-### Phase 4: Prediction-Enhanced Copytrading (Planned)
+### Phase 4: Independent Trading (Current)
 
-- [ ] Skip trades for consistently worst-performing symbols
-- [ ] Adjust position sizing based on confidence
-- [ ] Front-run high-confidence predictions
-- [ ] A/B testing framework
+- [x] IndependentTrader module with TP/SL/timeout
+- [x] High-confidence signal filtering (score ≥ 80)
+- [x] Whitelist-based symbol selection
+- [x] Target confirmation handling
+- [x] Conflict resolution with copy trading
+- [ ] Collect performance data
+- [ ] Validate win rates by symbol/score
+- [ ] Refine parameters based on results
 
 ### Phase 5: Hybrid/Independent Trading (Planned)
 
-- [ ] 80% copy + 20% independent
-- [ ] Gradual transition based on proven accuracy
+- [ ] Increase independent allocation based on proven accuracy
+- [ ] Gradual transition from copy to autonomous
 - [ ] Full autonomy when Sharpe ≥ 1.5
 
 ---
 
 ## Changelog
+
+### 2026-02-03 - Independent Trading System
+
+- ✅ Added IndependentTrader module for autonomous trading
+- ✅ High-confidence signals only (score ≥ 80, LONG only)
+- ✅ Whitelist: VVV, AXS, IP, LDO, AAVE, XMR, GRASS, SKY, ZORA
+- ✅ TP/SL management (+8%/-4%) with 24h timeout
+- ✅ Target confirmation handling (hand off to copy trading)
+- ✅ Conflict resolution in CopyTradingManager
+- ✅ IndependentPosition database model
+- ✅ Monitoring script: `npm run ml:independent-stats`
+- ✅ Removed WebSocket monitoring (using polling only)
 
 ### 2026-01-31 - Momentum Strategy v2
 
@@ -352,20 +424,18 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 ### 2026-01-24 - Phase 1 Launch
 
 - ✅ Position-based copytrading operational
-- ✅ WebSocket with robust reconnection
 - ✅ Google Cloud SQL database
 
 ---
 
 ## Next Steps
 
-1. **Deploy** the updated bot with momentum-v2 predictions
-2. **Monitor** predictions via `npm run ml:stats`
-3. **Collect data** for 2-4 weeks with new strategy
-4. **Validate** that momentum signals better match target behavior
-5. **Analyze** which specific signals are most predictive
-6. **Refine** scoring weights based on accuracy data
-7. **Consider** using predictions to filter/enhance copy trades
+1. **Deploy** with `ENABLE_INDEPENDENT_TRADING=false` first
+2. **Verify** no errors in logs
+3. **Enable** independent trading: `ENABLE_INDEPENDENT_TRADING=true`
+4. **Monitor** via `npm run ml:independent-stats`
+5. **Analyze** performance after 1-2 weeks
+6. **Adjust** parameters based on results
 
 ---
 

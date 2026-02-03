@@ -4,6 +4,7 @@ import {HyperliquidConnector} from "./HyperliquidConnector";
 import {logger} from "../utils/logger";
 import { prisma } from '../utils/db';
 import { PredictionLogger } from '../ml/PredictionLogger';
+import { IndependentTrader } from './IndependentTrader';
 
 dotenv.config(); // Load environment variables
 
@@ -26,15 +27,6 @@ const tradeStartTimes = new Map<string, number>();
 // Track failed orders to prevent immediate retries (symbol -> timestamp)
 const failedOrders = new Map<string, number>();
 const FAILED_ORDER_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown after failed order
-
-// WebSocket reconnection state
-let wsTransport: hl.WebSocketTransport | null = null;
-let wsClient: hl.SubscriptionClient | null = null;
-let reconnectAttempts = 0;
-let reconnectTimer: NodeJS.Timeout | null = null;
-let healthCheckTimer: NodeJS.Timeout | null = null;
-let lastWebSocketMessageTime = Date.now();
-const MAX_RECONNECT_DELAY = 60000; // 1 minute max
 
 // Asset metadata cache (fetched from Hyperliquid)
 const assetMetadataCache = new Map<string, any>();
@@ -222,6 +214,18 @@ export class CopyTradingManager {
                 logger.error(`Prediction logging failed: ${predError.message}`);
             }
 
+            // Independent trading: process signals and manage positions
+            if (IndependentTrader.isEnabled()) {
+                try {
+                    // Process new signals for entry opportunities
+                    await IndependentTrader.processSignals(allMarkets, targetPositions);
+                    // Manage existing positions (TP/SL/timeout)
+                    await IndependentTrader.managePositions(allMarkets, targetPositions);
+                } catch (indepError: any) {
+                    logger.error(`Independent trading error: ${indepError.message}`);
+                }
+            }
+
             // Track which symbols had copy actions
             const tradedSymbols = new Set<string>();
 
@@ -318,6 +322,15 @@ export class CopyTradingManager {
         // Determine required action
         if (targetSide === 'none' && ourSide !== 'none') {
             // Target closed, we need to close
+            // BUT: Check if this is an unconfirmed independent position
+            if (IndependentTrader.isEnabled()) {
+                const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
+                if (indepStatus.exists && !indepStatus.confirmed) {
+                    // Don't close unconfirmed independent positions via copy trading
+                    // They have their own TP/SL/timeout management
+                    return;
+                }
+            }
             positionDelta.needsAction = true;
             positionDelta.action = 'close';
         } else if (targetSide !== 'none' && ourSide === 'none') {
@@ -329,7 +342,17 @@ export class CopyTradingManager {
             positionDelta.needsAction = true;
             positionDelta.action = 'flip';
         } else if (targetSide !== 'none' && ourSide !== 'none' && targetSide === ourSide) {
-            // Same direction, check if size adjustment needed
+            // Same direction - check if this confirms an independent position
+            if (IndependentTrader.isEnabled()) {
+                const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
+                if (indepStatus.exists && !indepStatus.confirmed) {
+                    // Mark as confirmed - copy trading will now manage sizing
+                    await IndependentTrader.confirmPosition(ticker);
+                    logger.info(`✅ ${ticker}: Independent position confirmed by target`);
+                }
+            }
+
+            // Check if size adjustment needed
             const sizeDiff = Math.abs(ourSize - targetSizeForUs);
             const sizeThreshold = targetSizeForUs * POSITION_ADJUST_THRESHOLD;
 
@@ -523,198 +546,6 @@ export class CopyTradingManager {
             // Removed verbose log - trade is already logged in execution
         } catch (error: any) {
             logger.error(`Failed to log trade for ${symbol}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Real-time WebSocket monitoring for target vault fills
-     * Enhanced with robust reconnection logic and health checks
-     */
-    static watchTraders() {
-        this.initializeWebSocket();
-    }
-
-    private static initializeWebSocket() {
-        try {
-            // Clean up existing connections
-            if (wsTransport) {
-                try {
-                    // Close with permanently=true to prevent auto-reconnect and clean up listeners
-                    wsTransport.socket.close(1000, 'Reconnecting', true);
-                } catch (e) {
-                    // Ignore errors on close
-                }
-            }
-
-            // Clear existing timers
-            if (reconnectTimer) {
-                clearTimeout(reconnectTimer);
-                reconnectTimer = null;
-            }
-            if (healthCheckTimer) {
-                clearInterval(healthCheckTimer);
-                healthCheckTimer = null;
-            }
-
-            // Create new WebSocket connection
-            wsTransport = new hl.WebSocketTransport();
-            wsClient = new hl.SubscriptionClient({ transport: wsTransport });
-
-            // Connection opened
-            wsTransport.socket.addEventListener("open", () => {
-                logger.info("🔌 COPY TRADING: WebSocket connected");
-                reconnectAttempts = 0;
-                lastWebSocketMessageTime = Date.now(); // Reset timestamp
-
-                // Start health check
-                this.startHealthCheck();
-            });
-
-            // Track all messages to update health check timestamp
-            wsTransport.socket.addEventListener("message", () => {
-                lastWebSocketMessageTime = Date.now();
-            });
-
-            // Connection closed
-            wsTransport.socket.addEventListener("close", () => {
-                logger.warn("❌ COPY TRADING: WebSocket disconnected");
-
-                // Clear health check
-                if (healthCheckTimer) {
-                    clearInterval(healthCheckTimer);
-                    healthCheckTimer = null;
-                }
-
-                // Attempt reconnect with exponential backoff
-                this.scheduleReconnect();
-            });
-
-            // Connection error
-            wsTransport.socket.addEventListener("error", (error) => {
-                logger.error(`🚨 COPY TRADING: WebSocket error - ${error}`);
-                // Don't reconnect here, wait for close event
-            });
-
-            // Subscribe to target vault fills (non-blocking)
-            wsClient.userEvents({ user: COPY_TRADER }, (data) => {
-                // Don't await - process in background to avoid blocking WebSocket
-                this.processUserEvents(data).catch((error) => {
-                    logger.error(`Error processing userEvents: ${error.message}`);
-                });
-            });
-
-            logger.info(`👀 Watching target vault: ${COPY_TRADER}`);
-
-        } catch (error: any) {
-            logger.error(`Failed to initialize WebSocket: ${error.message}`);
-            this.scheduleReconnect();
-        }
-    }
-
-    /**
-     * Schedule reconnection with exponential backoff
-     */
-    private static scheduleReconnect() {
-        if (reconnectTimer) {
-            return; // Already scheduled
-        }
-
-        reconnectAttempts++;
-
-        // Exponential backoff: 2^n seconds, capped at MAX_RECONNECT_DELAY
-        const baseDelay = 2000; // Start with 2 seconds
-        const delay = Math.min(
-            baseDelay * Math.pow(2, reconnectAttempts - 1),
-            MAX_RECONNECT_DELAY
-        );
-
-        logger.info(`🔄 Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts})...`);
-
-        reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            logger.info(`🔄 Attempting WebSocket reconnection (attempt ${reconnectAttempts})...`);
-            this.initializeWebSocket();
-        }, delay);
-    }
-
-    /**
-     * Health check - verify connection is still alive
-     * If no messages received for 2 minutes, force reconnect
-     */
-    private static startHealthCheck() {
-        // Check every 30 seconds
-        healthCheckTimer = setInterval(() => {
-            const timeSinceLastMessage = Date.now() - lastWebSocketMessageTime;
-
-            if (timeSinceLastMessage > 120000) { // 2 minutes without messages
-                logger.warn(`⚠️  WebSocket stale (no messages for ${(timeSinceLastMessage / 1000).toFixed(0)}s)`);
-                logger.info(`🔄 Forcing WebSocket reconnection...`);
-
-                // Force close and reconnect
-                if (wsTransport) {
-                    try {
-                        wsTransport.socket.close();
-                    } catch (e) {
-                        // Ignore
-                    }
-                }
-                // scheduleReconnect will be called by close event
-            }
-        }, 30000); // Check every 30 seconds
-    }
-
-    /**
-     * Process user events from WebSocket (non-blocking)
-     */
-    private static async processUserEvents(data: any) {
-        try {
-            if (data && 'fills' in data) {
-                const fills = data.fills;
-
-                // Log fills to database for TWAP detection and analysis
-                // Use Promise.all with timeout to avoid blocking
-                const logPromises = fills.map((fill: any) =>
-                    Promise.race([
-                        this.logTargetFill(fill),
-                        new Promise((_, reject) =>
-                            setTimeout(() => reject(new Error('Database write timeout')), 5000)
-                        )
-                    ]).catch((error) => {
-                        logger.error(`Failed to log fill for ${fill.coin}: ${error.message}`);
-                    })
-                );
-
-                await Promise.all(logPromises);
-                logger.info(`📥 Target vault fill: ${fills[0].coin} ${fills[0].side} ${fills[0].sz} @ ${fills[0].px}`);
-            }
-        } catch (error: any) {
-            logger.error(`Error in processUserEvents: ${error.message}`);
-        }
-    }
-
-    /**
-     * Log target vault fills to database for TWAP detection
-     */
-    private static async logTargetFill(fill: any) {
-        try {
-            await prisma.fill.create({
-                data: {
-                    fillId: String(fill.tid || fill.oid),
-                    timestamp: new Date(fill.time),
-                    traderAddress: COPY_TRADER,
-                    symbol: fill.coin,
-                    side: fill.side,
-                    price: parseFloat(fill.px),
-                    size: parseFloat(fill.sz),
-                    positionSzi: fill.startPosition ? parseFloat(fill.startPosition) : 0,
-                    rawData: fill as any,
-                },
-            });
-        } catch (error: any) {
-            // Ignore duplicate errors (fills already in DB)
-            if (error.code !== 'P2002') {
-                logger.error(`Failed to log target fill: ${error.message}`);
-            }
         }
     }
 }

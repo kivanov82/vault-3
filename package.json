@@ -16,7 +16,8 @@
     "ml:strategy": "ts-node scripts/ml/strategy-analysis.ts",
     "ml:deep": "ts-node scripts/ml/deep-strategy-analysis.ts",
     "ml:save-report": "ts-node scripts/ml/save-strategy-report.ts",
-    "ml:cleanup": "ts-node scripts/ml/cleanup-predictions.ts"
+    "ml:cleanup": "ts-node scripts/ml/cleanup-predictions.ts",
+    "ml:independent-stats": "ts-node scripts/ml/independent-stats.ts"
   },
   "author": "",
   "license": "ISC",

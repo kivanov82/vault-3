@@ -255,3 +255,30 @@ model AnalysisReport {
 
   @@index([type, timestamp])
 }
+
+// Independent trading positions (autonomous trades based on high-confidence predictions)
+model IndependentPosition {
+  id                String   @id @default(uuid())
+  symbol            String
+  side              String   // 'long' (shorts disabled - 0% historical win rate)
+  entryPrice        Float
+  size              Float
+  sizeUsd           Float
+  leverage          Int
+  tpPrice           Float    // entry * 1.08 (8% take profit)
+  slPrice           Float    // entry * 0.96 (4% stop loss)
+  timeoutAt         DateTime // +24h from entry
+  status            String   @default("open") // open|confirmed|closed
+  confirmedByTarget Boolean  @default(false)
+  exitPrice         Float?
+  exitReason        String?  // tp|sl|timeout|target_confirmed|target_opposite
+  closedAt          DateTime?
+  realizedPnl       Float?
+  realizedPnlPct    Float?
+  predictionScore   Float?
+  predictionReasons String[]
+  createdAt         DateTime @default(now())
+
+  @@index([symbol, status])
+  @@index([status])
+}

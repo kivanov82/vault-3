@@ -63,9 +63,6 @@ export class Vault3 {
                 }
             });
 
-            // Real-time WebSocket monitoring (for logging & analysis)
-            CopyTradingManager.watchTraders();
-
             console.log('✅ Copytrading system started');
         } else {
             console.log('⚠️  Copy trading is disabled');
