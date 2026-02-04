@@ -72,11 +72,11 @@ Signal Detection (score ≥ 80, LONG only, whitelist symbol)
 |-----------|-------|-----------|
 | Max allocation | 3% of vault | ~$34 at current vault size |
 | Max positions | 3 concurrent | ~1% each |
-| Min score | 80 | Very high confidence only |
+| Min score | 90 | Very high confidence only |
 | Direction | LONG only | Shorts have 0% historical win rate |
 | Leverage | 5x | Matches target avg (4.8x rounded) |
-| Take Profit | +8% | Lock in gains |
-| Stop Loss | -4% | 2:1 risk/reward ratio |
+| Take Profit | +16% | Lock in gains |
+| Stop Loss | -8% | 2:1 risk/reward ratio |
 | Timeout | 24 hours | Max hold time |
 | Whitelist | VVV, AXS, IP, LDO, AAVE, XMR, GRASS, SKY, ZORA | 100% win rate symbols |
 
@@ -298,8 +298,8 @@ ENABLE_INDEPENDENT_TRADING=false  # Set to true to enable autonomous trading
 INDEPENDENT_MAX_ALLOCATION_PCT=0.03   # 3% of vault
 INDEPENDENT_MAX_POSITIONS=3           # Max concurrent positions
 INDEPENDENT_LEVERAGE=5                # 5x leverage
-INDEPENDENT_TP_PCT=0.08               # +8% take profit
-INDEPENDENT_SL_PCT=0.04               # -4% stop loss
+INDEPENDENT_TP_PCT=0.16               # +16% take profit
+INDEPENDENT_SL_PCT=0.08               # -8% stop loss
 INDEPENDENT_TIMEOUT_HOURS=24          # 24h max hold
 
 # Risk Management

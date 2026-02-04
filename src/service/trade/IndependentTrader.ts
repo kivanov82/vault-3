@@ -32,10 +32,10 @@ const CONFIG = {
   MAX_ALLOCATION_PCT: parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.03'),
   MAX_POSITIONS: parseInt(process.env.INDEPENDENT_MAX_POSITIONS || '3', 10),
   LEVERAGE: parseInt(process.env.INDEPENDENT_LEVERAGE || '5', 10),
-  TP_PCT: parseFloat(process.env.INDEPENDENT_TP_PCT || '0.08'),
-  SL_PCT: parseFloat(process.env.INDEPENDENT_SL_PCT || '0.04'),
+  TP_PCT: parseFloat(process.env.INDEPENDENT_TP_PCT || '0.16'),
+  SL_PCT: parseFloat(process.env.INDEPENDENT_SL_PCT || '0.08'),
   TIMEOUT_HOURS: parseInt(process.env.INDEPENDENT_TIMEOUT_HOURS || '24', 10),
-  MIN_SCORE: 80,
+  MIN_SCORE: 90,
   // Whitelist: symbols with 100% win rate from historical analysis
   WHITELIST: ['VVV', 'AXS', 'IP', 'LDO', 'AAVE', 'XMR', 'GRASS', 'SKY', 'ZORA'],
 };
