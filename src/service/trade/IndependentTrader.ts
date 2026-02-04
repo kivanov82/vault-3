@@ -20,6 +20,7 @@ import { prisma } from '../utils/db';
 import { logger } from '../utils/logger';
 import { HyperliquidConnector } from './HyperliquidConnector';
 import { PredictionLogger } from '../ml/PredictionLogger';
+import { assetMetadataCache } from './CopyTradingManager';
 
 dotenv.config();
 
@@ -38,9 +39,6 @@ const CONFIG = {
   // Whitelist: symbols with 100% win rate from historical analysis
   WHITELIST: ['VVV', 'AXS', 'IP', 'LDO', 'AAVE', 'XMR', 'GRASS', 'SKY', 'ZORA'],
 };
-
-// Asset metadata cache (shared with CopyTradingManager)
-const assetMetadataCache = new Map<string, any>();
 
 export class IndependentTrader {
   /**
@@ -252,7 +250,7 @@ export class IndependentTrader {
    */
   private static async openPosition(
     prediction: { symbol: string; score: number; direction: number | null; reasons: string[]; entryPrice: number },
-    sizeUsd: number,
+    marginUsd: number,
     allMarkets: Record<string, string>
   ): Promise<void> {
     const { symbol, score, reasons, entryPrice } = prediction;
@@ -265,9 +263,13 @@ export class IndependentTrader {
         return;
       }
 
-      // Calculate size in asset units
+      // Use capped leverage (respects asset's max leverage)
+      const leverage = tickerConfig.leverage;
+
+      // Calculate notional size from margin allocation
       const price = Number(allMarkets[symbol]) || entryPrice;
-      const size = sizeUsd / price;
+      const notionalUsd = marginUsd * leverage;
+      const size = notionalUsd / price;
 
       // Calculate TP/SL prices
       const tpPrice = price * (1 + CONFIG.TP_PCT);
@@ -279,20 +281,20 @@ export class IndependentTrader {
         tickerConfig,
         true, // long only
         size,
-        CONFIG.LEVERAGE,
+        leverage,
         false, // don't add to existing
         price
       );
 
-      // Record in database
+      // Record in database (store notional size for P&L tracking)
       await prisma.independentPosition.create({
         data: {
           symbol,
           side: 'long',
           entryPrice: price,
           size,
-          sizeUsd,
-          leverage: CONFIG.LEVERAGE,
+          sizeUsd: notionalUsd,
+          leverage,
           tpPrice,
           slPrice,
           timeoutAt,
@@ -303,7 +305,7 @@ export class IndependentTrader {
         },
       });
 
-      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN long ${size.toFixed(4)} @ $${price.toFixed(2)} (score: ${score}, TP: $${tpPrice.toFixed(2)}, SL: $${slPrice.toFixed(2)})`);
+      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN long ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, margin: $${marginUsd.toFixed(2)}, notional: $${notionalUsd.toFixed(2)}, score: ${score})`);
 
     } catch (error: any) {
       logger.error(`❌ ${symbol}: Independent open failed - ${error.message}`);
@@ -423,32 +425,12 @@ export class IndependentTrader {
   }
 
   /**
-   * Get ticker config from Hyperliquid metadata
+   * Get ticker config from shared metadata cache (populated by CopyTradingManager)
    */
-  private static async getTickerConfig(symbol: string): Promise<any | null> {
-    // Fetch metadata if not cached
-    if (assetMetadataCache.size === 0) {
-      try {
-        const transport = await import('@nktkas/hyperliquid').then(m => new m.HttpTransport());
-        const info = await import('@nktkas/hyperliquid').then(m => new m.InfoClient({ transport }));
-        const meta = await info.meta();
-
-        meta.universe.forEach((asset, index) => {
-          assetMetadataCache.set(asset.name, {
-            name: asset.name,
-            id: index,
-            szDecimals: asset.szDecimals,
-            maxLeverage: asset.maxLeverage,
-          });
-        });
-      } catch (error: any) {
-        logger.error(`Failed to fetch asset metadata: ${error.message}`);
-        return null;
-      }
-    }
-
+  private static getTickerConfig(symbol: string): any | null {
     const metadata = assetMetadataCache.get(symbol);
     if (!metadata) {
+      logger.warn(`⚠️  ${symbol}: No metadata in cache (CopyTradingManager may not have run yet)`);
       return null;
     }
 

@@ -18,8 +18,8 @@ const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5
 // Position adjustment threshold (e.g., 0.1 = 10% difference triggers rebalance)
 const POSITION_ADJUST_THRESHOLD = parseFloat(process.env.POSITION_ADJUST_THRESHOLD || '0.1');
 
-// Scale multiplier for copy positions (1.2 = 20% larger than proportional)
-const COPY_SCALE_MULTIPLIER = parseFloat(process.env.COPY_SCALE_MULTIPLIER || '1.2');
+// Scale multiplier for copy positions (1.3 = 30% larger than proportional)
+const COPY_SCALE_MULTIPLIER = parseFloat(process.env.COPY_SCALE_MULTIPLIER || '1.3');
 
 // Track last scan time for latency calculation
 const tradeStartTimes = new Map<string, number>();
@@ -28,8 +28,8 @@ const tradeStartTimes = new Map<string, number>();
 const failedOrders = new Map<string, number>();
 const FAILED_ORDER_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown after failed order
 
-// Asset metadata cache (fetched from Hyperliquid)
-const assetMetadataCache = new Map<string, any>();
+// Asset metadata cache (fetched from Hyperliquid) - exported for IndependentTrader
+export const assetMetadataCache = new Map<string, any>();
 let assetMetadataFetched = false;
 
 // Scan mutex to prevent overlapping scans
@@ -201,7 +201,11 @@ export class CopyTradingManager {
                 .map(ap => ap.position.coin);
 
             // Get unique set of all symbols to check
-            const allSymbols = [...new Set([...targetSymbols, ...ourSymbols])];
+            // Include independent trading whitelist so we can detect signals on fresh symbols
+            const independentWhitelist = IndependentTrader.isEnabled()
+                ? IndependentTrader.getConfig().WHITELIST
+                : [];
+            const allSymbols = [...new Set([...targetSymbols, ...ourSymbols, ...independentWhitelist])];
 
             // Log scan summary
             const scanSummary = `📊 Scan: ${allSymbols.length} symbols (${targetSymbols.length} target, ${ourSymbols.length} ours) | Scale: ${(scaleFactor * 100).toFixed(1)}% | Available: $${ourPortfolio.available.toFixed(2)}`;

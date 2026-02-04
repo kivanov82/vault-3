@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
 **Project Status:** Phase 4 - Independent Trading System
-**Last Updated:** 2026-02-03
+**Last Updated:** 2026-02-04
 
 ---
 
@@ -288,6 +288,7 @@ npm run docker-push
 COPY_TRADER=0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
+COPY_SCALE_MULTIPLIER=1.3            # 30% larger than proportional
 
 # Phase Control
 ENABLE_COPY_TRADING=true
@@ -377,6 +378,13 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 
 ## Changelog
 
+### 2026-02-04 - Independent Trading Bug Fixes
+
+- ✅ Fixed prediction scope: now includes whitelist symbols for independent trading signals
+- ✅ Fixed sizing calculation: margin allocation now correctly multiplied by leverage for notional
+- ✅ Fixed leverage limits: IndependentTrader now uses shared metadata cache from CopyTradingManager
+- ✅ Increased copy trading scale multiplier from 20% to 30% (COPY_SCALE_MULTIPLIER=1.3)
+
 ### 2026-02-03 - Independent Trading System
 
 - ✅ Added IndependentTrader module for autonomous trading
@@ -430,12 +438,10 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 
 ## Next Steps
 
-1. **Deploy** with `ENABLE_INDEPENDENT_TRADING=false` first
-2. **Verify** no errors in logs
-3. **Enable** independent trading: `ENABLE_INDEPENDENT_TRADING=true`
-4. **Monitor** via `npm run ml:independent-stats`
-5. **Analyze** performance after 1-2 weeks
-6. **Adjust** parameters based on results
+1. **Monitor** independent trading via `npm run ml:independent-stats`
+2. **Track** TP/SL/timeout exits and win rates by symbol
+3. **Analyze** performance after 1-2 weeks
+4. **Adjust** parameters based on results (score threshold, whitelist, TP/SL levels)
 
 ---
 
