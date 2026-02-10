@@ -233,20 +233,23 @@ export class CopyTradingManager {
             // Track which symbols had copy actions
             const tradedSymbols = new Set<string>();
 
-            // Process each symbol with timeout protection
-            // Pass the already-fetched positions and markets to avoid redundant API calls
-            const syncPromises = allSymbols.map(symbol =>
-                Promise.race([
-                    this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, ourPositions, allMarkets, tradedSymbols),
-                    new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Sync timeout')), 30000) // 30 second timeout per symbol
-                    )
-                ]).catch((e: any) => {
-                    logger.error(`❌ ${symbol}: ${e.message}`);
-                })
-            );
-
-            await Promise.all(syncPromises);
+            // Process symbols in batches to avoid overwhelming the API
+            // Batch size of 5 prevents connection timeouts
+            const BATCH_SIZE = 5;
+            for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
+                const batch = allSymbols.slice(i, i + BATCH_SIZE);
+                const batchPromises = batch.map(symbol =>
+                    Promise.race([
+                        this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, ourPositions, allMarkets, tradedSymbols),
+                        new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('Sync timeout')), 30000) // 30 second timeout per symbol
+                        )
+                    ]).catch((e: any) => {
+                        logger.error(`❌ ${symbol}: ${e.message}`);
+                    })
+                );
+                await Promise.all(batchPromises);
+            }
 
             // Finalize predictions for symbols that had no copy action
             try {
