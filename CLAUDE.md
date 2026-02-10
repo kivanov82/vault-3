@@ -56,29 +56,25 @@ Autonomous trading based on high-confidence prediction signals, running alongsid
 ### How It Works
 
 ```
-Signal Detection (score ≥ 80, LONG only, whitelist symbol)
+Signal Detection (score ≥ 90, LONG only, whitelist symbol)
     ↓
   OPEN position → Check every 5 min:
     ├─ Target confirmed same direction? → Hand to copy trading
     ├─ Target opened opposite? → Close immediately
-    ├─ Price ≥ TP (+8%)? → Close with profit
-    ├─ Price ≤ SL (-4%)? → Close with loss
-    └─ Time ≥ 24h? → Close at market (timeout)
+    └─ Time ≥ 4h? → Close at market (v3: time-based exit)
 ```
 
 ### Parameters
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Max allocation | 3% of vault | ~$34 at current vault size |
-| Max positions | 3 concurrent | ~1% each |
+| Max allocation | 10% of vault | v2: increased from 3% |
+| Max positions | 3 concurrent | ~3.3% each |
 | Min score | 90 | Very high confidence only |
 | Direction | LONG only | Shorts have 0% historical win rate |
 | Leverage | 5x | Matches target avg (4.8x rounded) |
-| Take Profit | +16% | Lock in gains |
-| Stop Loss | -8% | 2:1 risk/reward ratio |
-| Timeout | 24 hours | Max hold time |
-| Whitelist | VVV, AXS, IP, LDO, AAVE, XMR, GRASS, SKY, ZORA | 100% win rate symbols |
+| Exit strategy | 4h fixed hold | v3: no TP/SL, paper shows 99% win rate |
+| Whitelist | VVV, AXS, LDO, AAVE, XMR, GRASS, SKY, ZORA, kPEPE, BERA | Added kPEPE/BERA, removed IP |
 
 ### Conflict Resolution
 
@@ -295,12 +291,13 @@ ENABLE_COPY_TRADING=true
 ENABLE_INDEPENDENT_TRADING=false  # Set to true to enable autonomous trading
 
 # Independent Trading
-INDEPENDENT_MAX_ALLOCATION_PCT=0.03   # 3% of vault
+INDEPENDENT_MAX_ALLOCATION_PCT=0.10   # 10% of vault
 INDEPENDENT_MAX_POSITIONS=3           # Max concurrent positions
 INDEPENDENT_LEVERAGE=5                # 5x leverage
-INDEPENDENT_TP_PCT=0.16               # +16% take profit
-INDEPENDENT_SL_PCT=0.08               # -8% stop loss
-INDEPENDENT_TIMEOUT_HOURS=24          # 24h max hold
+INDEPENDENT_USE_TIME_EXIT=true        # v3: time-based exit (no TP/SL)
+INDEPENDENT_HOLD_HOURS=4              # v3: 4h fixed hold
+INDEPENDENT_TP_PCT=0.20               # only used if USE_TIME_EXIT=false
+INDEPENDENT_SL_PCT=0.12               # only used if USE_TIME_EXIT=false
 
 # Risk Management
 MIN_POSITION_SIZE_USD=5
@@ -377,6 +374,18 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 ---
 
 ## Changelog
+
+### 2026-02-10 - Independent Trading v3 (Time-Based Exit)
+
+Analysis showed paper trading has 99% win rate with 4h hold, but live TP/SL had 27% win rate.
+Hypothesis: TP/SL triggers on volatility before the predicted move completes.
+
+- ✅ Switched to 4h fixed hold (no TP/SL)
+- ✅ Increased max allocation from 3% to 10% of vault
+- ✅ Removed IP from whitelist (poor live performance)
+- ✅ Added kPEPE and BERA to whitelist (100% paper win rate)
+- ✅ Reset historic data for clean v3 analysis
+- ✅ Will evaluate after 1 week of data collection
 
 ### 2026-02-04 - Independent Trading Bug Fixes
 

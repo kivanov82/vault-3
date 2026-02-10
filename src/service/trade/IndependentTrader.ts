@@ -1,18 +1,25 @@
 /**
  * IndependentTrader - Autonomous trading based on high-confidence predictions
  *
- * Opens small positions (max 3% of vault) when:
- * - Prediction score >= 80 (very high confidence)
+ * Opens small positions (max 10% of vault) when:
+ * - Prediction score >= 90 (very high confidence)
  * - Direction is LONG only (shorts have 0% historical win rate)
- * - Symbol is on whitelist (100% win rate symbols)
+ * - Symbol is on whitelist (proven performers)
  * - No existing position (copy or independent)
  * - Under max allocation limit
  *
- * Manages positions with:
- * - Take profit: +8%
- * - Stop loss: -4%
- * - Timeout: 24 hours
+ * Exit strategy (v3 - time-based):
+ * - Fixed 4-hour hold (no TP/SL)
  * - Target confirmation handling
+ *
+ * v3 changes (2026-02-10):
+ * - Switched to 4h fixed hold (no TP/SL)
+ * - Paper trading shows 99% win rate with 4h hold vs 27% with TP/SL
+ * - Hypothesis: TP/SL triggers on volatility before move completes
+ *
+ * v2 changes (2026-02-10):
+ * - Increased allocation from 3% to 10%
+ * - Removed IP from whitelist, added kPEPE/BERA
  */
 
 import dotenv from 'dotenv';
@@ -29,15 +36,17 @@ const WALLET = process.env.WALLET as `0x${string}`;
 // Configuration (can be overridden via env vars)
 const CONFIG = {
   ENABLED: process.env.ENABLE_INDEPENDENT_TRADING === 'true',
-  MAX_ALLOCATION_PCT: parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.03'),
+  MAX_ALLOCATION_PCT: parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.10'),
   MAX_POSITIONS: parseInt(process.env.INDEPENDENT_MAX_POSITIONS || '3', 10),
   LEVERAGE: parseInt(process.env.INDEPENDENT_LEVERAGE || '5', 10),
-  TP_PCT: parseFloat(process.env.INDEPENDENT_TP_PCT || '0.16'),
-  SL_PCT: parseFloat(process.env.INDEPENDENT_SL_PCT || '0.08'),
-  TIMEOUT_HOURS: parseInt(process.env.INDEPENDENT_TIMEOUT_HOURS || '24', 10),
+  // v3: Time-based exit (no TP/SL) - paper trading shows 99% win rate with 4h hold
+  USE_TIME_BASED_EXIT: process.env.INDEPENDENT_USE_TIME_EXIT !== 'false',  // default: true
+  HOLD_HOURS: parseInt(process.env.INDEPENDENT_HOLD_HOURS || '4', 10),     // v3: 4h fixed hold
+  TP_PCT: parseFloat(process.env.INDEPENDENT_TP_PCT || '0.20'),   // only used if USE_TIME_BASED_EXIT=false
+  SL_PCT: parseFloat(process.env.INDEPENDENT_SL_PCT || '0.12'),   // only used if USE_TIME_BASED_EXIT=false
   MIN_SCORE: 90,
-  // Whitelist: symbols with 100% win rate from historical analysis
-  WHITELIST: ['VVV', 'AXS', 'IP', 'LDO', 'AAVE', 'XMR', 'GRASS', 'SKY', 'ZORA'],
+  // Whitelist: proven performers from paper trading analysis
+  WHITELIST: ['VVV', 'AXS', 'LDO', 'AAVE', 'XMR', 'GRASS', 'SKY', 'ZORA', 'kPEPE', 'BERA'],
 };
 
 export class IndependentTrader {
@@ -221,19 +230,22 @@ export class IndependentTrader {
           }
         }
 
-        // Check take profit
-        if (currentPrice >= pos.tpPrice) {
-          await this.closePosition(pos, currentPrice, 'tp');
-          continue;
+        // Check TP/SL only if not using time-based exit
+        if (!CONFIG.USE_TIME_BASED_EXIT) {
+          // Check take profit
+          if (currentPrice >= pos.tpPrice) {
+            await this.closePosition(pos, currentPrice, 'tp');
+            continue;
+          }
+
+          // Check stop loss
+          if (currentPrice <= pos.slPrice) {
+            await this.closePosition(pos, currentPrice, 'sl');
+            continue;
+          }
         }
 
-        // Check stop loss
-        if (currentPrice <= pos.slPrice) {
-          await this.closePosition(pos, currentPrice, 'sl');
-          continue;
-        }
-
-        // Check timeout
+        // Check timeout (always applies - this is the exit for time-based strategy)
         if (new Date() >= pos.timeoutAt) {
           await this.closePosition(pos, currentPrice, 'timeout');
           continue;
@@ -271,10 +283,10 @@ export class IndependentTrader {
       const notionalUsd = marginUsd * leverage;
       const size = notionalUsd / price;
 
-      // Calculate TP/SL prices
-      const tpPrice = price * (1 + CONFIG.TP_PCT);
-      const slPrice = price * (1 - CONFIG.SL_PCT);
-      const timeoutAt = new Date(Date.now() + CONFIG.TIMEOUT_HOURS * 60 * 60 * 1000);
+      // Calculate exit parameters
+      const tpPrice = CONFIG.USE_TIME_BASED_EXIT ? 0 : price * (1 + CONFIG.TP_PCT);
+      const slPrice = CONFIG.USE_TIME_BASED_EXIT ? 0 : price * (1 - CONFIG.SL_PCT);
+      const timeoutAt = new Date(Date.now() + CONFIG.HOLD_HOURS * 60 * 60 * 1000);
 
       // Execute the trade
       await HyperliquidConnector.openCopyPosition(
@@ -305,7 +317,10 @@ export class IndependentTrader {
         },
       });
 
-      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN long ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, margin: $${marginUsd.toFixed(2)}, notional: $${notionalUsd.toFixed(2)}, score: ${score})`);
+      const exitInfo = CONFIG.USE_TIME_BASED_EXIT
+        ? `${CONFIG.HOLD_HOURS}h hold`
+        : `TP:${(CONFIG.TP_PCT*100).toFixed(0)}%/SL:${(CONFIG.SL_PCT*100).toFixed(0)}%`;
+      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN long ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, $${notionalUsd.toFixed(0)} notional, ${exitInfo}, score: ${score})`);
 
     } catch (error: any) {
       logger.error(`❌ ${symbol}: Independent open failed - ${error.message}`);
