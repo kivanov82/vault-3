@@ -202,13 +202,9 @@ export class HyperliquidConnector {
         }
 
         // Create new clients only once
+        // Use official Hyperliquid API (more reliable than third-party RPCs)
         const transport = new hl.HttpTransport({
-            timeout: 30000, // 30 second timeout for ALL HTTP requests (CRITICAL FIX)
-            server: {
-                mainnet: {
-                    rpc: 'https://rpc.hyperlend.finance',
-                }
-            }
+            timeout: 30000, // 30 second timeout for ALL HTTP requests
         });
         const viemAccount = privateKeyToAccount(TRADING_PKEY);
         const viemClient = new hl.ExchangeClient({
