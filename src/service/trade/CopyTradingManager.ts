@@ -269,9 +269,8 @@ export class CopyTradingManager {
 
             // Log completion (only if there were actions)
             const duration = Date.now() - scanStartTime;
-            const actionsCount = syncPromises.length;
-            if (actionsCount > 0) {
-                logger.info(`✅ Scan complete (${duration}ms)`);
+            if (tradedSymbols.size > 0) {
+                logger.info(`✅ Scan complete: ${tradedSymbols.size} actions (${duration}ms)`);
             }
         } catch (e: any) {
             logger.error(`❌ Scan failed: ${e.message}`);
