@@ -103,7 +103,8 @@ export class IndependentTrader {
       const maxAllocationUsd = portfolio.portfolio * CONFIG.MAX_ALLOCATION_PCT;
 
       if (openIndependent.length >= CONFIG.MAX_POSITIONS) {
-        return; // At max positions
+        logger.info(`🎯 Independent: At max positions (${CONFIG.MAX_POSITIONS}), skipping`);
+        return;
       }
 
       // Filter and sort predictions by score (highest first)
@@ -123,6 +124,12 @@ export class IndependentTrader {
           return true;
         })
         .sort((a, b) => b.score - a.score);
+
+      // Log eligible signals for debugging
+      if (eligiblePredictions.length > 0) {
+        const eligible = eligiblePredictions.map(p => `${p.symbol}(${p.score})`).join(', ');
+        logger.info(`🎯 Independent: ${eligiblePredictions.length} eligible signals: ${eligible}`);
+      }
 
       if (eligiblePredictions.length === 0) {
         return;
