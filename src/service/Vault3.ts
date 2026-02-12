@@ -1,6 +1,7 @@
 import schedule from "node-schedule";
 import {CopyTradingManager} from "./trade/CopyTradingManager";
 import {StartupSync} from "./data/StartupSync";
+import {IndependentTrader} from "./trade/IndependentTrader";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -16,6 +17,7 @@ export class Vault3 {
     static async init(): Promise<any> {
         console.log('\n🚀 Vault-3 Initializing...');
         console.log(`   Copy Trading: ${ENABLE_COPY_TRADING ? '✅ ENABLED' : '❌ DISABLED'}`);
+        console.log(`   Independent Trading: ${IndependentTrader.isEnabled() ? '✅ ENABLED' : '❌ DISABLED'} (env: ${process.env.ENABLE_INDEPENDENT_TRADING})`);
 
         // Heartbeat to ensure process is alive and monitor resources
         heartbeatInterval = setInterval(() => {
