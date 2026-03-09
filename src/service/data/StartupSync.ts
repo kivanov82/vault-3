@@ -16,6 +16,7 @@ export class StartupSync {
   /**
    * Sync recent fills on startup
    * This ensures we didn't miss any fills while bot was offline or WebSocket was down
+   * Uses pagination to fetch all missing fills (API returns max 2000 per request)
    */
   static async syncRecentFills(): Promise<void> {
     try {
@@ -30,71 +31,91 @@ export class StartupSync {
       const lastDbTimestamp = latestFillInDb?.timestamp || new Date(0);
       logger.info(`📅 Latest fill in DB: ${lastDbTimestamp.toISOString()}`);
 
-      // Fetch recent fills from API (last 5 days to avoid hitting API limits)
       const transport = new hl.HttpTransport();
       const info = new hl.InfoClient({ transport });
 
-      const fiveDaysAgo = Date.now() - (5 * 24 * 60 * 60 * 1000);
-      logger.info(`📡 Fetching fills from Hyperliquid API (since ${new Date(fiveDaysAgo).toISOString()})...`);
-      const apiFills = await info.userFillsByTime({
-        user: COPY_TRADER,
-        startTime: fiveDaysAgo,
-        aggregateByTime: false,
-      });
+      // Paginate from last DB timestamp to now (API returns max 2000 per request)
+      let startTime = lastDbTimestamp.getTime() + 1; // +1ms to avoid re-fetching last fill
+      let totalFetched = 0;
+      let totalImported = 0;
+      let totalDuplicates = 0;
+      const MAX_PAGES = 20; // Safety limit to avoid infinite loops
 
-      logger.info(`📦 Fetched ${apiFills.length} fills from API`);
+      for (let page = 0; page < MAX_PAGES; page++) {
+        logger.info(`📡 Fetching fills page ${page + 1} (from ${new Date(startTime).toISOString()})...`);
 
-      // Filter fills newer than what we have in DB
-      let newFills = apiFills.filter(fill => {
-        const fillTime = new Date(fill.time);
-        return fillTime > lastDbTimestamp;
-      });
+        const apiFills = await info.userFillsByTime({
+          user: COPY_TRADER,
+          startTime,
+          aggregateByTime: false,
+        });
 
-      if (newFills.length === 0) {
+        if (apiFills.length === 0) {
+          break;
+        }
+
+        totalFetched += apiFills.length;
+        logger.info(`📦 Page ${page + 1}: ${apiFills.length} fills`);
+
+        // Import fills
+        let pageImported = 0;
+        let pageDuplicates = 0;
+
+        for (const fill of apiFills) {
+          try {
+            await prisma.fill.create({
+              data: {
+                fillId: String(fill.tid || fill.oid),
+                timestamp: new Date(fill.time),
+                traderAddress: COPY_TRADER,
+                symbol: fill.coin,
+                side: fill.side,
+                price: parseFloat(fill.px),
+                size: parseFloat(fill.sz),
+                positionSzi: fill.startPosition ? parseFloat(fill.startPosition) : 0,
+                rawData: fill as any,
+              },
+            });
+            pageImported++;
+          } catch (error: any) {
+            if (error.code === 'P2002') {
+              pageDuplicates++;
+            } else {
+              logger.error(`Failed to import fill ${fill.tid}: ${error.message}`);
+            }
+          }
+        }
+
+        totalImported += pageImported;
+        totalDuplicates += pageDuplicates;
+
+        // If we got fewer than 2000, we've reached the end
+        if (apiFills.length < 2000) {
+          break;
+        }
+
+        // Move startTime to after the last fill in this page for next iteration
+        const lastFillTime = Math.max(...apiFills.map(f => f.time));
+        startTime = lastFillTime + 1;
+
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      if (totalFetched === 0) {
         logger.info('✅ Database is up to date - no missing fills');
         return;
       }
 
-      logger.info(`🆕 Found ${newFills.length} new fills to import`);
-
-      // Import new fills
-      let imported = 0;
-      let duplicates = 0;
-
-      for (const fill of newFills) {
-        try {
-          await prisma.fill.create({
-            data: {
-              fillId: String(fill.tid || fill.oid),
-              timestamp: new Date(fill.time),
-              traderAddress: COPY_TRADER,
-              symbol: fill.coin,
-              side: fill.side,
-              price: parseFloat(fill.px),
-              size: parseFloat(fill.sz),
-              positionSzi: fill.startPosition ? parseFloat(fill.startPosition) : 0,
-              rawData: fill as any,
-            },
-          });
-          imported++;
-        } catch (error: any) {
-          if (error.code === 'P2002') {
-            // Duplicate - already in database
-            duplicates++;
-          } else {
-            logger.error(`Failed to import fill ${fill.tid}: ${error.message}`);
-          }
-        }
-      }
-
       logger.info(`✅ Startup sync complete:`);
-      logger.info(`   Imported: ${imported} new fills`);
-      if (duplicates > 0) {
-        logger.info(`   Skipped: ${duplicates} duplicates`);
+      logger.info(`   Fetched: ${totalFetched} fills`);
+      logger.info(`   Imported: ${totalImported} new fills`);
+      if (totalDuplicates > 0) {
+        logger.info(`   Skipped: ${totalDuplicates} duplicates`);
       }
 
       // Aggregate new fills into trades if any were imported
-      if (imported > 0) {
+      if (totalImported > 0) {
         await this.aggregateNewFills();
       }
 

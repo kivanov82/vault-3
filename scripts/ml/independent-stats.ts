@@ -20,31 +20,29 @@ const prisma = new PrismaClient({ adapter });
 async function main() {
   console.log('🎯 Independent Trading Stats\n');
 
-  // Configuration (v3 defaults - time-based exit)
+  // Configuration (v4 defaults - trailing stop)
   const config = {
     maxAllocationPct: parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.10'),
     maxPositions: parseInt(process.env.INDEPENDENT_MAX_POSITIONS || '3', 10),
     leverage: parseInt(process.env.INDEPENDENT_LEVERAGE || '5', 10),
-    useTimeBasedExit: process.env.INDEPENDENT_USE_TIME_EXIT !== 'false',
-    holdHours: parseInt(process.env.INDEPENDENT_HOLD_HOURS || '4', 10),
-    tpPct: parseFloat(process.env.INDEPENDENT_TP_PCT || '0.20'),
-    slPct: parseFloat(process.env.INDEPENDENT_SL_PCT || '0.12'),
+    minHoldHours: parseInt(process.env.INDEPENDENT_MIN_HOLD_HOURS || '12', 10),
+    maxHoldHours: parseInt(process.env.INDEPENDENT_MAX_HOLD_HOURS || '72', 10),
+    trailingStopPct: parseFloat(process.env.INDEPENDENT_TRAILING_STOP_PCT || '0.03'),
+    hardStopPct: parseFloat(process.env.INDEPENDENT_HARD_STOP_PCT || '0.05'),
     enabled: process.env.ENABLE_INDEPENDENT_TRADING === 'true',
   };
 
   console.log('═'.repeat(60));
-  console.log('Configuration (v3)');
+  console.log('Configuration (v4)');
   console.log('═'.repeat(60));
   console.log(`  Enabled:               ${config.enabled ? '✅ YES' : '❌ NO'}`);
   console.log(`  Max allocation:        ${(config.maxAllocationPct * 100).toFixed(1)}% of vault`);
   console.log(`  Max positions:         ${config.maxPositions}`);
   console.log(`  Leverage:              ${config.leverage}x`);
-  if (config.useTimeBasedExit) {
-    console.log(`  Exit strategy:         ${config.holdHours}h fixed hold (no TP/SL)`);
-  } else {
-    console.log(`  Take Profit:           +${(config.tpPct * 100).toFixed(1)}%`);
-    console.log(`  Stop Loss:             -${(config.slPct * 100).toFixed(1)}%`);
-  }
+  console.log(`  Min hold:              ${config.minHoldHours}h (before trailing stop activates)`);
+  console.log(`  Trailing stop:         ${(config.trailingStopPct * 100).toFixed(0)}% from peak`);
+  console.log(`  Hard stop:             -${(config.hardStopPct * 100).toFixed(0)}% from entry`);
+  console.log(`  Max hold:              ${config.maxHoldHours}h`);
 
   // Overall counts
   const total = await prisma.independentPosition.count();

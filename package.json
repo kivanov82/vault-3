@@ -17,7 +17,11 @@
     "ml:deep": "ts-node scripts/ml/deep-strategy-analysis.ts",
     "ml:save-report": "ts-node scripts/ml/save-strategy-report.ts",
     "ml:cleanup": "ts-node scripts/ml/cleanup-predictions.ts",
-    "ml:independent-stats": "ts-node scripts/ml/independent-stats.ts"
+    "ml:independent-stats": "ts-node scripts/ml/independent-stats.ts",
+    "ml:analysis": "ts-node scripts/ml/trading-analysis.ts",
+    "ml:target-analysis": "ts-node scripts/ml/target-deep-analysis.ts",
+    "db:proxy": "./cloud-sql-proxy bright-union:europe-west1:vault3-db --port 5432",
+    "db:studio": "npx prisma studio"
   },
   "author": "",
   "license": "ISC",

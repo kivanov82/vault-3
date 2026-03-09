@@ -1,50 +1,52 @@
 /**
- * Prediction Logger - Momentum Strategy v2
+ * Prediction Logger - Momentum Strategy v3
  *
- * Based on target vault analysis (Jan 2026):
- * - Breakout/momentum buying (65% of entries at upper price range)
- * - BTC correlation (77% same direction as BTC)
- * - More active when BTC is calm (8x more trades)
- * - Session pattern: Accumulate Asia/EU (89%/78% buys), trim US (65% buys)
- * - TWAP accumulation style
- * - Long-biased (64%)
+ * Based on deep target vault analysis (Nov 2025 - Mar 2026, 27K+ fills, 88 cycles):
+ * - 87.7% long opens (even more long-biased than v2 assumed)
+ * - Shorts are surgical hedges (89% win rate vs 43% for longs)
+ * - Optimal hold time: 1-3 days (67% WR, +10.32% avg P&L)
+ * - Europe entries best (71.9% WR), Asia worst (26.3% WR)
+ * - Multi-fill (TWAP) entries outperform single-fill (60.9% vs 54.8% WR)
+ * - No mechanical TP/SL - discretionary exits spread from -10% to +50%
+ * - Top performers: HYPE, ETH, SOL, VVV, MON, FARTCOIN
  *
- * Integrates with CopyTradingManager to:
- * 1. Run predictions BEFORE copy actions
- * 2. Log predictions with entry prices
- * 3. Validate predictions after 4 hours (not 1 hour)
- * 4. Track paper P&L for shadow mode validation
+ * v3 changes (Mar 2026):
+ * - Session weights flipped: EU best (+10), US good (+6), Asia low (+3)
+ * - Updated symbol lists from cycle analysis
+ * - Higher base for short signals (target's shorts are 89% WR)
+ * - Longer validation window (36h matches optimal hold)
  */
 
 import { prisma } from '../utils/db';
 import { logger } from '../utils/logger';
 
-// Strategy parameters based on target vault analysis
+// Strategy parameters based on deep target vault analysis (27K+ fills, 88 complete cycles)
 const STRATEGY = {
-  // Top symbols from target (by fill count)
-  TOP_SYMBOLS: ['HYPE', 'VVV', 'SKY', 'MON', 'SPX', 'FARTCOIN', 'PUMP'],
+  // Top symbols by cycle performance (>= 5 cycles, positive avg P&L)
+  TOP_SYMBOLS: ['HYPE', 'ETH', 'SOL', 'VVV', 'MON', 'FARTCOIN'],
 
-  // Symbols they often trade together
-  CORRELATED_BASKET: ['FARTCOIN', 'SPX', 'HYPE', 'PUMP', 'MON'],
+  // Secondary symbols with fewer cycles but positive results
+  SECONDARY_SYMBOLS: ['PUMP', 'kPEPE', 'SPX', 'SKY'],
 
-  // Session definitions (UTC)
-  ASIA_HOURS: [0, 1, 2, 3, 4, 5, 6, 7],        // 89% buys
-  EUROPE_HOURS: [8, 9, 10, 11, 12, 13, 14, 15], // 78% buys
-  US_HOURS: [16, 17, 18, 19, 20, 21, 22, 23],   // 65% buys
+  // Session definitions (UTC) - scored by entry WIN RATE from cycle analysis
+  // Europe: 71.9% WR, US: 62.2% WR, Asia: 26.3% WR
+  ASIA_HOURS: [0, 1, 2, 3, 4, 5, 6, 7],
+  EUROPE_HOURS: [8, 9, 10, 11, 12, 13, 14, 15],
+  US_HOURS: [16, 17, 18, 19, 20, 21, 22, 23],
 
   // Breakout thresholds
   BREAKOUT_THRESHOLD: 0.7,  // Price in upper 30% of recent range
   DIP_THRESHOLD: 0.3,       // Price in lower 30% of recent range
 
-  // BTC calm threshold (they trade 8x more when BTC moves < 1%)
+  // BTC calm threshold (they trade more when BTC moves < 1%)
   BTC_CALM_THRESHOLD: 1.0,  // % move in 1h
 
   // High confidence threshold
   HIGH_CONFIDENCE_THRESHOLD: 65,
 };
 
-// Validation window: 4 hours (target holds positions longer)
-const VALIDATION_WINDOW_MS = 4 * 60 * 60 * 1000;
+// Validation window: 36 hours (target's sweet spot is 1-3 days)
+const VALIDATION_WINDOW_MS = 36 * 60 * 60 * 1000;
 
 // In-memory prediction cache for current scan
 const currentScanPredictions = new Map<string, {
@@ -158,31 +160,30 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
   }
 
   // === 4. SESSION AWARENESS ===
-  if (STRATEGY.ASIA_HOURS.includes(hour)) {
-    // Asia session: 89% buys - strong long bias
+  // Based on cycle analysis: EU entries 71.9% WR, US 62.2%, Asia 26.3%
+  if (STRATEGY.EUROPE_HOURS.includes(hour)) {
+    // Europe session: best entry win rate (71.9%)
     score += 10;
-    reasons.push('asia_session');
-    longSignals++;
-  } else if (STRATEGY.EUROPE_HOURS.includes(hour)) {
-    // Europe session: 78% buys - long bias
-    score += 8;
     reasons.push('europe_session');
     longSignals++;
   } else if (STRATEGY.US_HOURS.includes(hour)) {
-    // US session: 65% buys - more balanced
-    score += 3;
+    // US session: decent entry win rate (62.2%)
+    score += 6;
     reasons.push('us_session');
+  } else if (STRATEGY.ASIA_HOURS.includes(hour)) {
+    // Asia session: worst entry win rate (26.3%)
+    score += 3;
+    reasons.push('asia_session');
   }
 
   // === 5. SYMBOL QUALITY ===
+  // Based on cycle analysis: top symbols have 57-86% WR with positive avg P&L
   if (STRATEGY.TOP_SYMBOLS.includes(symbol)) {
     score += 10;
     reasons.push('top_symbol');
-  }
-
-  if (STRATEGY.CORRELATED_BASKET.includes(symbol)) {
+  } else if (STRATEGY.SECONDARY_SYMBOLS.includes(symbol)) {
     score += 5;
-    reasons.push('basket_symbol');
+    reasons.push('secondary_symbol');
   }
 
   // === 6. MACD MOMENTUM ===
@@ -219,14 +220,20 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
   }
 
   // === DIRECTION DETERMINATION ===
-  // Target is 64% long-biased, so tie goes to long
+  // Target is 87.7% long-biased, so tie goes to long
+  // BUT shorts have 89% WR when used (surgical hedges)
   let direction: number | null = null;
   if (longSignals > shortSignals) {
     direction = 1; // Long
   } else if (shortSignals > longSignals) {
     direction = -1; // Short
+    // Short signals get a bonus - target's shorts are 89% WR
+    if (shortSignals >= 3) {
+      score += 5;
+      reasons.push('strong_short_signal');
+    }
   } else if (longSignals > 0) {
-    // Tie with signals present - bias to long (64% historical)
+    // Tie with signals present - bias to long (87.7% historical)
     direction = 1;
   }
 
@@ -364,7 +371,7 @@ export class PredictionLogger {
             reasons,
             entryPrice: price,
             features: marketState as any,
-            modelVersion: 'momentum-v2',
+            modelVersion: 'momentum-v3',
           },
         });
 
@@ -459,7 +466,7 @@ export class PredictionLogger {
         validatedAt: null,
         timestamp: { lt: cutoff },
         entryPrice: { not: null },
-        modelVersion: 'momentum-v2',
+        modelVersion: 'momentum-v3',
       },
       take: 100,
     });
@@ -548,17 +555,17 @@ export class PredictionLogger {
     avgPaperPnlPct: number;
   }> {
     const total = await prisma.prediction.count({
-      where: { modelVersion: 'momentum-v2' }
+      where: { modelVersion: 'momentum-v3' }
     });
     const validated = await prisma.prediction.count({
-      where: { validatedAt: { not: null }, modelVersion: 'momentum-v2' },
+      where: { validatedAt: { not: null }, modelVersion: 'momentum-v3' },
     });
     const correct = await prisma.prediction.count({
-      where: { correct: true, modelVersion: 'momentum-v2' },
+      where: { correct: true, modelVersion: 'momentum-v3' },
     });
 
     const pnlAgg = await prisma.prediction.aggregate({
-      where: { validatedAt: { not: null }, modelVersion: 'momentum-v2' },
+      where: { validatedAt: { not: null }, modelVersion: 'momentum-v3' },
       _sum: { paperPnl: true },
       _avg: { paperPnlPct: true },
     });

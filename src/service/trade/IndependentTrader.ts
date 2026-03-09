@@ -1,25 +1,30 @@
 /**
- * IndependentTrader - Autonomous trading based on high-confidence predictions
+ * IndependentTrader v4 - Autonomous trading based on deep target analysis
  *
- * Opens small positions (max 10% of vault) when:
+ * Based on analysis of 27K+ fills, 88 complete position cycles:
+ *
+ * Entry criteria:
  * - Prediction score >= 90 (very high confidence)
- * - Direction is LONG only (shorts have 0% historical win rate)
- * - Symbol is on whitelist (proven performers)
+ * - Direction: LONG primary (target 43% WR but high avg P&L)
+ *   SHORTS allowed when score >= 95 (target 89% short WR)
+ * - Symbol on whitelist (proven target performers)
  * - No existing position (copy or independent)
  * - Under max allocation limit
  *
- * Exit strategy (v3 - time-based):
- * - Fixed 4-hour hold (no TP/SL)
- * - Target confirmation handling
+ * Exit strategy (v4 - trailing stop):
+ * - Min hold: 12h (don't exit during noise - sub-12h has -0.55% avg)
+ * - After 12h: trailing stop at 3% from peak price
+ * - Hard stop: -5% from entry at any time (risk management)
+ * - Max hold: 72h (3-7d bucket drops to 33% WR)
+ * - Target confirmation/opposite handling unchanged
  *
- * v3 changes (2026-02-10):
- * - Switched to 4h fixed hold (no TP/SL)
- * - Paper trading shows 99% win rate with 4h hold vs 27% with TP/SL
- * - Hypothesis: TP/SL triggers on volatility before move completes
- *
- * v2 changes (2026-02-10):
- * - Increased allocation from 3% to 10%
- * - Removed IP from whitelist, added kPEPE/BERA
+ * v4 changes (2026-03-09):
+ * - Hold time: 4h → 12h min / 72h max with trailing stop
+ * - Trailing stop: 3% from peak after min hold
+ * - Hard stop: -5% from entry (always active)
+ * - Whitelist: HYPE, SOL, VVV, ETH, MON, FARTCOIN (from cycle analysis)
+ * - Shorts allowed at very high confidence (score >= 95)
+ * - Dropped AXS (worst performer in live trading: -$446 net)
  */
 
 import dotenv from 'dotenv';
@@ -39,15 +44,24 @@ const CONFIG = {
   MAX_ALLOCATION_PCT: parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.10'),
   MAX_POSITIONS: parseInt(process.env.INDEPENDENT_MAX_POSITIONS || '3', 10),
   LEVERAGE: parseInt(process.env.INDEPENDENT_LEVERAGE || '5', 10),
-  // v3: Time-based exit (no TP/SL) - paper trading shows 99% win rate with 4h hold
-  USE_TIME_BASED_EXIT: process.env.INDEPENDENT_USE_TIME_EXIT !== 'false',  // default: true
-  HOLD_HOURS: parseInt(process.env.INDEPENDENT_HOLD_HOURS || '4', 10),     // v3: 4h fixed hold
-  TP_PCT: parseFloat(process.env.INDEPENDENT_TP_PCT || '0.20'),   // only used if USE_TIME_BASED_EXIT=false
-  SL_PCT: parseFloat(process.env.INDEPENDENT_SL_PCT || '0.12'),   // only used if USE_TIME_BASED_EXIT=false
-  MIN_SCORE: 90,
-  // Whitelist: proven performers from paper trading analysis
-  WHITELIST: ['VVV', 'AXS', 'LDO', 'AAVE', 'XMR', 'GRASS', 'SKY', 'ZORA', 'kPEPE', 'BERA'],
+
+  // v4: Trailing stop exit strategy
+  MIN_HOLD_HOURS: parseInt(process.env.INDEPENDENT_MIN_HOLD_HOURS || '12', 10),
+  MAX_HOLD_HOURS: parseInt(process.env.INDEPENDENT_MAX_HOLD_HOURS || '72', 10),
+  TRAILING_STOP_PCT: parseFloat(process.env.INDEPENDENT_TRAILING_STOP_PCT || '0.03'),  // 3% from peak
+  HARD_STOP_PCT: parseFloat(process.env.INDEPENDENT_HARD_STOP_PCT || '0.05'),          // -5% from entry
+
+  // Score thresholds
+  MIN_SCORE_LONG: 90,
+  MIN_SCORE_SHORT: 95,  // Higher bar for shorts
+
+  // Whitelist: proven performers from target vault cycle analysis
+  // HYPE: 69% WR, ETH: 82% WR, SOL: 86% WR, VVV: 75% WR, MON: 75% WR, FARTCOIN: 57% WR
+  WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'MON', 'FARTCOIN'],
 };
+
+// In-memory peak price tracking for trailing stops
+const peakPrices = new Map<string, number>();
 
 export class IndependentTrader {
   /**
@@ -110,10 +124,6 @@ export class IndependentTrader {
       // Filter and sort predictions by score (highest first)
       const eligiblePredictions = Array.from(predictions.values())
         .filter(p => {
-          // Must meet minimum score
-          if (p.score < CONFIG.MIN_SCORE) return false;
-          // Must be LONG direction (shorts have 0% win rate)
-          if (p.direction !== 1) return false;
           // Must be on whitelist
           if (!CONFIG.WHITELIST.includes(p.symbol)) return false;
           // Must not already have position (copy or independent)
@@ -121,13 +131,20 @@ export class IndependentTrader {
           if (independentSymbols.has(p.symbol)) return false;
           // Must not be a symbol target already has (defer to copy trading)
           if (targetSymbols.has(p.symbol)) return false;
-          return true;
+
+          // Direction-specific score thresholds
+          if (p.direction === 1 && p.score >= CONFIG.MIN_SCORE_LONG) return true;
+          if (p.direction === -1 && p.score >= CONFIG.MIN_SCORE_SHORT) return true;
+          return false;
         })
         .sort((a, b) => b.score - a.score);
 
       // Log eligible signals for debugging
       if (eligiblePredictions.length > 0) {
-        const eligible = eligiblePredictions.map(p => `${p.symbol}(${p.score})`).join(', ');
+        const eligible = eligiblePredictions.map(p => {
+          const dir = p.direction === 1 ? 'L' : 'S';
+          return `${p.symbol}(${p.score}${dir})`;
+        }).join(', ');
         logger.info(`🎯 Independent: ${eligiblePredictions.length} eligible signals: ${eligible}`);
       }
 
@@ -168,7 +185,7 @@ export class IndependentTrader {
 
         // Update tracking
         independentSymbols.add(pred.symbol);
-        openIndependent.push({ symbol: pred.symbol } as any); // Quick hack for count
+        openIndependent.push({ symbol: pred.symbol } as any);
       }
 
     } catch (error: any) {
@@ -177,8 +194,8 @@ export class IndependentTrader {
   }
 
   /**
-   * Manage existing independent positions (TP/SL/timeout checks)
-   * Called during each scan cycle
+   * Manage existing independent positions
+   * v4: Trailing stop after min hold, hard stop always, max hold timeout
    */
   static async managePositions(
     allMarkets: Record<string, string>,
@@ -216,7 +233,7 @@ export class IndependentTrader {
           continue;
         }
 
-        // Check target confirmation
+        // === 1. TARGET CONFIRMATION CHECK ===
         const targetPos = targetPositionMap.get(pos.symbol);
         if (targetPos) {
           if (targetPos.side === pos.side) {
@@ -233,29 +250,54 @@ export class IndependentTrader {
           } else {
             // Target opened opposite direction - close our position
             await this.closePosition(pos, currentPrice, 'target_opposite');
+            peakPrices.delete(pos.symbol);
             continue;
           }
         }
 
-        // Check TP/SL only if not using time-based exit
-        if (!CONFIG.USE_TIME_BASED_EXIT) {
-          // Check take profit
-          if (currentPrice >= pos.tpPrice) {
-            await this.closePosition(pos, currentPrice, 'tp');
-            continue;
-          }
-
-          // Check stop loss
-          if (currentPrice <= pos.slPrice) {
-            await this.closePosition(pos, currentPrice, 'sl');
-            continue;
-          }
+        // === 2. UPDATE PEAK PRICE for trailing stop ===
+        const holdTimeMs = Date.now() - pos.createdAt.getTime();
+        const currentPeak = peakPrices.get(pos.symbol) || pos.entryPrice;
+        if (pos.side === 'long' && currentPrice > currentPeak) {
+          peakPrices.set(pos.symbol, currentPrice);
+        } else if (pos.side === 'short' && currentPrice < currentPeak) {
+          peakPrices.set(pos.symbol, currentPrice);
+        } else if (!peakPrices.has(pos.symbol)) {
+          peakPrices.set(pos.symbol, pos.entryPrice);
         }
+        const peak = peakPrices.get(pos.symbol)!;
 
-        // Check timeout (always applies - this is the exit for time-based strategy)
-        if (new Date() >= pos.timeoutAt) {
-          await this.closePosition(pos, currentPrice, 'timeout');
+        // === 3. HARD STOP - always active (-5% from entry) ===
+        const pnlFromEntry = pos.side === 'long'
+          ? (currentPrice - pos.entryPrice) / pos.entryPrice
+          : (pos.entryPrice - currentPrice) / pos.entryPrice;
+
+        if (pnlFromEntry <= -CONFIG.HARD_STOP_PCT) {
+          await this.closePosition(pos, currentPrice, 'hard_stop');
+          peakPrices.delete(pos.symbol);
           continue;
+        }
+
+        // === 4. MAX HOLD TIMEOUT ===
+        const maxHoldMs = CONFIG.MAX_HOLD_HOURS * 60 * 60 * 1000;
+        if (holdTimeMs >= maxHoldMs) {
+          await this.closePosition(pos, currentPrice, 'timeout');
+          peakPrices.delete(pos.symbol);
+          continue;
+        }
+
+        // === 5. TRAILING STOP - only after min hold period ===
+        const minHoldMs = CONFIG.MIN_HOLD_HOURS * 60 * 60 * 1000;
+        if (holdTimeMs >= minHoldMs) {
+          const dropFromPeak = pos.side === 'long'
+            ? (peak - currentPrice) / peak
+            : (currentPrice - peak) / peak;
+
+          if (dropFromPeak >= CONFIG.TRAILING_STOP_PCT) {
+            await this.closePosition(pos, currentPrice, 'trailing_stop');
+            peakPrices.delete(pos.symbol);
+            continue;
+          }
         }
       }
 
@@ -272,7 +314,9 @@ export class IndependentTrader {
     marginUsd: number,
     allMarkets: Record<string, string>
   ): Promise<void> {
-    const { symbol, score, reasons, entryPrice } = prediction;
+    const { symbol, score, direction, reasons, entryPrice } = prediction;
+    const isLong = direction === 1;
+    const side = isLong ? 'long' : 'short';
 
     try {
       // Get ticker config
@@ -290,33 +334,34 @@ export class IndependentTrader {
       const notionalUsd = marginUsd * leverage;
       const size = notionalUsd / price;
 
-      // Calculate exit parameters
-      const tpPrice = CONFIG.USE_TIME_BASED_EXIT ? 0 : price * (1 + CONFIG.TP_PCT);
-      const slPrice = CONFIG.USE_TIME_BASED_EXIT ? 0 : price * (1 - CONFIG.SL_PCT);
-      const timeoutAt = new Date(Date.now() + CONFIG.HOLD_HOURS * 60 * 60 * 1000);
+      // Calculate timeout
+      const maxTimeoutAt = new Date(Date.now() + CONFIG.MAX_HOLD_HOURS * 60 * 60 * 1000);
 
       // Execute the trade
       await HyperliquidConnector.openCopyPosition(
         tickerConfig,
-        true, // long only
+        isLong,
         size,
         leverage,
         false, // don't add to existing
         price
       );
 
-      // Record in database (store notional size for P&L tracking)
+      // Initialize peak price tracking
+      peakPrices.set(symbol, price);
+
+      // Record in database
       await prisma.independentPosition.create({
         data: {
           symbol,
-          side: 'long',
+          side,
           entryPrice: price,
           size,
           sizeUsd: notionalUsd,
           leverage,
-          tpPrice,
-          slPrice,
-          timeoutAt,
+          tpPrice: 0,  // v4: no fixed TP, using trailing stop
+          slPrice: 0,  // v4: no fixed SL, using hard stop + trailing
+          timeoutAt: maxTimeoutAt,
           status: 'open',
           confirmedByTarget: false,
           predictionScore: score,
@@ -324,10 +369,8 @@ export class IndependentTrader {
         },
       });
 
-      const exitInfo = CONFIG.USE_TIME_BASED_EXIT
-        ? `${CONFIG.HOLD_HOURS}h hold`
-        : `TP:${(CONFIG.TP_PCT*100).toFixed(0)}%/SL:${(CONFIG.SL_PCT*100).toFixed(0)}%`;
-      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN long ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, $${notionalUsd.toFixed(0)} notional, ${exitInfo}, score: ${score})`);
+      const dirLabel = isLong ? 'LONG' : 'SHORT';
+      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN ${dirLabel} ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, $${notionalUsd.toFixed(0)} notional, trailing stop ${(CONFIG.TRAILING_STOP_PCT*100)}% after ${CONFIG.MIN_HOLD_HOURS}h, hard stop ${(CONFIG.HARD_STOP_PCT*100)}%, max ${CONFIG.MAX_HOLD_HOURS}h, score: ${score})`);
 
     } catch (error: any) {
       logger.error(`❌ ${symbol}: Independent open failed - ${error.message}`);
@@ -386,15 +429,16 @@ export class IndependentTrader {
       });
 
       const pnlEmoji = realizedPnl >= 0 ? '💰' : '📉';
-      const reasonEmoji = {
-        tp: '🎯',
-        sl: '🛑',
+      const reasonEmoji: Record<string, string> = {
+        trailing_stop: '📐',
+        hard_stop: '🛑',
         timeout: '⏰',
         target_confirmed: '✅',
         target_opposite: '🔄',
-      }[reason] || '❓';
+      };
+      const emoji = reasonEmoji[reason] || '❓';
 
-      logger.info(`${reasonEmoji} ${symbol}: INDEPENDENT CLOSE ${reason} @ $${exitPrice.toFixed(2)} ${pnlEmoji} P&L: $${realizedPnl.toFixed(2)} (${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%)`);
+      logger.info(`${emoji} ${symbol}: INDEPENDENT CLOSE ${reason} @ $${exitPrice.toFixed(2)} ${pnlEmoji} P&L: $${realizedPnl.toFixed(2)} (${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%)`);
 
     } catch (error: any) {
       logger.error(`❌ ${symbol}: Independent close failed - ${error.message}`);
@@ -444,6 +488,8 @@ export class IndependentTrader {
         status: 'confirmed',
       },
     });
+    // Clean up peak price tracking - copy trading takes over
+    peakPrices.delete(symbol);
   }
 
   /**

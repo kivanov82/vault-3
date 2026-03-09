@@ -230,6 +230,12 @@ export class CopyTradingManager {
                 }
             }
 
+            // Re-fetch our positions after independent trading to avoid stale data
+            // (IndependentTrader may have opened/closed positions above)
+            const freshOurPositions = IndependentTrader.isEnabled()
+                ? await HyperliquidConnector.getOpenPositions(WALLET)
+                : ourPositions;
+
             // Track which symbols had copy actions
             const tradedSymbols = new Set<string>();
 
@@ -240,7 +246,7 @@ export class CopyTradingManager {
                 const batch = allSymbols.slice(i, i + BATCH_SIZE);
                 const batchPromises = batch.map(symbol =>
                     Promise.race([
-                        this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, ourPositions, allMarkets, tradedSymbols),
+                        this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, freshOurPositions, allMarkets, tradedSymbols),
                         new Promise((_, reject) =>
                             setTimeout(() => reject(new Error('Sync timeout')), 30000) // 30 second timeout per symbol
                         )
@@ -345,6 +351,17 @@ export class CopyTradingManager {
             positionDelta.action = 'open';
         } else if (targetSide !== 'none' && ourSide !== 'none' && targetSide !== ourSide) {
             // Target flipped direction, we need to flip
+            // BUT: Check if this is an unconfirmed independent position
+            if (IndependentTrader.isEnabled()) {
+                const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
+                if (indepStatus.exists && !indepStatus.confirmed) {
+                    // Independent position with opposite target direction
+                    // IndependentTrader.managePositions already handles this (closes on target_opposite)
+                    // Skip flip to avoid race condition with stale position data
+                    logger.info(`⏸️  ${ticker}: Skipping flip - independent position being closed by IndependentTrader`);
+                    return;
+                }
+            }
             positionDelta.needsAction = true;
             positionDelta.action = 'flip';
         } else if (targetSide !== 'none' && ourSide !== 'none' && targetSide === ourSide) {
