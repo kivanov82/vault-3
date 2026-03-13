@@ -71,12 +71,23 @@ interface MarketState {
   macd?: number | null;
   macdSignal?: number | null;
   macdHist?: number | null;
+  // Bollinger Bands
+  bbUpper?: number | null;
+  bbLower?: number | null;
+  bbMiddle?: number | null;
+  bbWidth?: number | null;
+  // EMAs
+  ema9?: number | null;
+  ema21?: number | null;
   // Volatility
   atrPercent?: number | null;
   // BTC context
   btcChange1h?: number | null;
   btcChange4h?: number | null;
   btcIsCalm?: boolean;
+  // BTC indicators (for regime detection)
+  btcRsi14?: number | null;
+  btcBbPosition?: number | null;
   // Funding
   fundingRate?: number | null;
 }
@@ -198,7 +209,93 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
     }
   }
 
-  // === 7. VOLATILITY (they like volatile assets) ===
+  // === 7. RSI (overbought/oversold) ===
+  if (state.rsi14 !== null && state.rsi14 !== undefined) {
+    if (state.rsi14 < 30) {
+      // Oversold - strong long signal
+      score += 10;
+      reasons.push('rsi_oversold');
+      longSignals += 2;
+    } else if (state.rsi14 < 40) {
+      // Approaching oversold
+      score += 5;
+      reasons.push('rsi_low');
+      longSignals++;
+    } else if (state.rsi14 > 70) {
+      // Overbought - target often shorts here
+      score += 5;
+      reasons.push('rsi_overbought');
+      shortSignals += 2;
+    } else if (state.rsi14 > 60) {
+      // Approaching overbought
+      reasons.push('rsi_high');
+      shortSignals++;
+    }
+  }
+
+  // === 8. BOLLINGER BAND POSITION ===
+  if (state.bbUpper !== null && state.bbLower !== null &&
+      state.bbUpper !== undefined && state.bbLower !== undefined && state.price) {
+    const bbRange = state.bbUpper - state.bbLower!;
+    if (bbRange > 0) {
+      const bbPosition = (state.price - state.bbLower!) / bbRange;
+
+      if (bbPosition < 0.1) {
+        // Price at or below lower band - mean reversion long
+        score += 10;
+        reasons.push('bb_lower_touch');
+        longSignals += 2;
+      } else if (bbPosition < 0.3) {
+        score += 5;
+        reasons.push('bb_lower_zone');
+        longSignals++;
+      } else if (bbPosition > 0.9) {
+        // Price at or above upper band - overextended
+        score += 5;
+        reasons.push('bb_upper_touch');
+        shortSignals += 2;
+      } else if (bbPosition > 0.7) {
+        reasons.push('bb_upper_zone');
+        shortSignals++;
+      }
+    }
+
+    // BB squeeze detection (low width = imminent breakout)
+    if (state.bbWidth !== null && state.bbWidth !== undefined) {
+      if (state.bbWidth < 0.02) {
+        score += 5;
+        reasons.push('bb_squeeze');
+      }
+    }
+  }
+
+  // === 9. EMA TREND ===
+  if (state.ema9 !== null && state.ema21 !== null &&
+      state.ema9 !== undefined && state.ema21 !== undefined) {
+    if (state.ema9 > state.ema21) {
+      score += 3;
+      reasons.push('ema_bullish');
+      longSignals++;
+    } else {
+      reasons.push('ema_bearish');
+      shortSignals++;
+    }
+  }
+
+  // === 10. BTC REGIME DETECTION ===
+  // Target flips entire portfolio based on BTC regime
+  if (state.btcRsi14 !== null && state.btcRsi14 !== undefined) {
+    if (state.btcRsi14 < 30) {
+      score += 5;
+      reasons.push('btc_oversold');
+      longSignals++;
+    } else if (state.btcRsi14 > 70) {
+      reasons.push('btc_overbought');
+      shortSignals++;
+    }
+  }
+
+  // === 11. VOLATILITY (they like volatile assets) ===
   if (state.atrPercent !== null && state.atrPercent !== undefined) {
     if (state.atrPercent > 5) {
       score += 5;
@@ -206,7 +303,7 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
     }
   }
 
-  // === 8. FUNDING (contrarian signal) ===
+  // === 12. FUNDING (contrarian signal) ===
   if (state.fundingRate !== null && state.fundingRate !== undefined) {
     if (state.fundingRate > 0.02) {
       // High positive funding = potential short squeeze
@@ -304,6 +401,21 @@ export class PredictionLogger {
 
     const btcIsCalm = btcChange1h !== null && Math.abs(btcChange1h) < STRATEGY.BTC_CALM_THRESHOLD;
 
+    // Get BTC indicators for regime detection
+    const btcIndicator = await prisma.technicalIndicator.findFirst({
+      where: { symbol: 'BTC', timeframe: '1h' },
+      orderBy: { timestamp: 'desc' },
+    });
+
+    const btcRsi14 = btcIndicator?.rsi14 ?? null;
+    let btcBbPosition: number | null = null;
+    if (btcIndicator?.bbUpper && btcIndicator?.bbLower && btcCandles.length > 0) {
+      const bbRange = btcIndicator.bbUpper - btcIndicator.bbLower;
+      if (bbRange > 0) {
+        btcBbPosition = (btcCandles[0].close - btcIndicator.bbLower) / bbRange;
+      }
+    }
+
     for (const symbol of symbols) {
       try {
         const price = Number(marketPrices[symbol]);
@@ -348,12 +460,20 @@ export class PredictionLogger {
           macd: indicator?.macd ?? null,
           macdSignal: indicator?.macdSignal ?? null,
           macdHist: indicator?.macdHist ?? null,
+          bbUpper: indicator?.bbUpper ?? null,
+          bbLower: indicator?.bbLower ?? null,
+          bbMiddle: indicator?.bbMiddle ?? null,
+          bbWidth: indicator?.bbWidth ?? null,
+          ema9: indicator?.ema9 ?? null,
+          ema21: indicator?.ema21 ?? null,
           atrPercent: indicator?.atr14 && candles[0]
             ? (indicator.atr14 / candles[0].close) * 100
             : null,
           btcChange1h,
           btcChange4h,
           btcIsCalm,
+          btcRsi14,
+          btcBbPosition,
           fundingRate: funding?.rate ?? null,
         };
 

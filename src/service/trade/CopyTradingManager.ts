@@ -5,6 +5,7 @@ import {logger} from "../utils/logger";
 import { prisma } from '../utils/db';
 import { PredictionLogger } from '../ml/PredictionLogger';
 import { IndependentTrader } from './IndependentTrader';
+import { MarketDataCollector } from '../data/MarketDataCollector';
 
 dotenv.config(); // Load environment variables
 
@@ -210,6 +211,13 @@ export class CopyTradingManager {
             // Log scan summary
             const scanSummary = `📊 Scan: ${allSymbols.length} symbols (${targetSymbols.length} target, ${ourSymbols.length} ours) | Scale: ${(scaleFactor * 100).toFixed(1)}% | Available: $${ourPortfolio.available.toFixed(2)}`;
             logger.info(scanSummary);
+
+            // Collect fresh market data (candles + indicators) BEFORE predictions
+            try {
+                await MarketDataCollector.collect(allSymbols);
+            } catch (dataError: any) {
+                logger.error(`Market data collection failed: ${dataError.message}`);
+            }
 
             // Run predictions BEFORE copy actions (shadow mode)
             try {
