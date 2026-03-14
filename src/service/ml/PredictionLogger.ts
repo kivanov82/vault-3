@@ -1,45 +1,67 @@
 /**
- * Prediction Logger - Momentum Strategy v3
+ * Prediction Logger - Momentum Strategy v4
  *
- * Based on deep target vault analysis (Nov 2025 - Mar 2026, 27K+ fills, 88 cycles):
- * - 87.7% long opens (even more long-biased than v2 assumed)
- * - Shorts are surgical hedges (89% win rate vs 43% for longs)
- * - Optimal hold time: 1-3 days (67% WR, +10.32% avg P&L)
- * - Europe entries best (71.9% WR), Asia worst (26.3% WR)
- * - Multi-fill (TWAP) entries outperform single-fill (60.9% vs 54.8% WR)
- * - No mechanical TP/SL - discretionary exits spread from -10% to +50%
- * - Top performers: HYPE, ETH, SOL, VVV, MON, FARTCOIN
+ * Based on deep target vault analysis (Nov 2025 - Mar 2026, 43K+ fills, 649 position events):
  *
- * v3 changes (Mar 2026):
- * - Session weights flipped: EU best (+10), US good (+6), Asia low (+3)
- * - Updated symbol lists from cycle analysis
- * - Higher base for short signals (target's shorts are 89% WR)
- * - Longer validation window (36h matches optimal hold)
+ * KEY INSIGHT: Target is a portfolio hedger, not a directional trader.
+ * - 43% of time holds both longs AND shorts simultaneously
+ * - Hedging periods last 1-3 days (median 48h)
+ * - Short side is where the money is (10-30x larger notional)
+ *
+ * Symbol roles (from hedging analysis):
+ * - Always long: ENA, IP, SKY, RESOLV, VIRTUAL, AERO, JUP, FARTCOIN, ZEC
+ * - Always short: SKR, PUMP(75%), MON(75%)
+ * - Switches direction: BTC, ETH, SOL, HYPE, VVV, kPEPE
+ *
+ * Indicator profile at entries (454 matched events):
+ * - LONG entries: RSI broad (median 50), 12% at RSI>70 (breakout buying)
+ *   BB position spread across band, 14% above upper band
+ *   MACD 51% bullish (not a strong filter)
+ * - SHORT entries: RSI 47.6 median, clusters 50-60 (41%)
+ *   BB position in lower half (38% in 0.2-0.4)
+ *   MACD 91% bearish — strongest directional signal
+ * - CLOSES: RSI 40-60 (71%), BB middle, MACD 32% bullish
+ *
+ * v4 changes (Mar 2026):
+ * - Added RSI, Bollinger Band, EMA signals (now with live data collection)
+ * - MACD heavily weighted for short signals (91% accuracy)
+ * - RSI scoring adjusted: >70 is long signal (breakout), not short
+ * - BB lower touch is strong long signal, upper zone is weak short
+ * - BTC RSI for macro regime detection
+ * - Symbol roles updated from hedging analysis
  */
 
 import { prisma } from '../utils/db';
 import { logger } from '../utils/logger';
 
-// Strategy parameters based on deep target vault analysis (27K+ fills, 88 complete cycles)
+// Strategy parameters based on deep target vault analysis (43K+ fills, hedging analysis)
 const STRATEGY = {
-  // Top symbols by cycle performance (>= 5 cycles, positive avg P&L)
+  // Symbols the target always longs during hedging (>90% long)
+  ALWAYS_LONG_SYMBOLS: ['ENA', 'IP', 'SKY', 'RESOLV', 'VIRTUAL', 'AERO', 'JUP', 'FARTCOIN', 'ZEC', 'AXS', 'BERA', 'XMR', 'AIXBT', 'AVNT'],
+
+  // Symbols the target switches direction on (these are the interesting ones)
+  DIRECTIONAL_SYMBOLS: ['BTC', 'ETH', 'SOL', 'HYPE', 'VVV', 'kPEPE', 'SPX'],
+
+  // Symbols the target mostly shorts (>70% short)
+  MOSTLY_SHORT_SYMBOLS: ['SKR', 'PUMP', 'MON', 'LIT', 'BNB'],
+
+  // Top performers for independent trading
   TOP_SYMBOLS: ['HYPE', 'ETH', 'SOL', 'VVV', 'MON', 'FARTCOIN'],
 
-  // Secondary symbols with fewer cycles but positive results
+  // Secondary symbols
   SECONDARY_SYMBOLS: ['PUMP', 'kPEPE', 'SPX', 'SKY'],
 
   // Session definitions (UTC) - scored by entry WIN RATE from cycle analysis
-  // Europe: 71.9% WR, US: 62.2% WR, Asia: 26.3% WR
   ASIA_HOURS: [0, 1, 2, 3, 4, 5, 6, 7],
   EUROPE_HOURS: [8, 9, 10, 11, 12, 13, 14, 15],
   US_HOURS: [16, 17, 18, 19, 20, 21, 22, 23],
 
   // Breakout thresholds
-  BREAKOUT_THRESHOLD: 0.7,  // Price in upper 30% of recent range
-  DIP_THRESHOLD: 0.3,       // Price in lower 30% of recent range
+  BREAKOUT_THRESHOLD: 0.7,
+  DIP_THRESHOLD: 0.3,
 
-  // BTC calm threshold (they trade more when BTC moves < 1%)
-  BTC_CALM_THRESHOLD: 1.0,  // % move in 1h
+  // BTC calm threshold
+  BTC_CALM_THRESHOLD: 1.0,
 
   // High confidence threshold
   HIGH_CONFIDENCE_THRESHOLD: 65,
@@ -93,8 +115,13 @@ interface MarketState {
 }
 
 /**
- * Score a prediction using momentum/breakout signals
- * Based on target vault behavior analysis
+ * Score a prediction using momentum/breakout signals + technical indicators
+ *
+ * Based on 454 matched indicator events at target position changes:
+ * - MACD is strongest short filter (91% bearish when target shorts)
+ * - RSI > 70 = long signal (breakout buying), NOT short
+ * - BB lower touch = strong long, BB upper = weak short
+ * - Target is a portfolio hedger (43% of time has both longs and shorts)
  */
 function scorePrediction(symbol: string, state: MarketState): { score: number; direction: number | null; reasons: string[] } {
   let score = 50;
@@ -104,163 +131,68 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
 
   const hour = new Date().getUTCHours();
 
-  // === 1. BREAKOUT DETECTION (most important - 65% of entries are breakouts) ===
-  if (state.pricePosition !== null && state.pricePosition !== undefined) {
-    if (state.pricePosition > STRATEGY.BREAKOUT_THRESHOLD) {
-      // Price breaking out (upper 30% of recent range)
-      score += 20;
-      reasons.push('breakout');
-      longSignals += 2;
-    } else if (state.pricePosition < STRATEGY.DIP_THRESHOLD) {
-      // Price at dip - target still buys some dips (35%)
-      score += 5;
-      reasons.push('dip');
-      longSignals++;
-    }
-  }
-
-  // === 2. MOMENTUM CONFIRMATION ===
-  if (state.priceChange1h !== null && state.priceChange1h !== undefined) {
-    if (state.priceChange1h > 0.5) {
-      // Positive momentum (they buy strength)
-      score += 15;
-      reasons.push('momentum_up');
-      longSignals++;
-    } else if (state.priceChange1h < -0.5) {
-      // Negative momentum
-      score += 5;
-      reasons.push('momentum_down');
-      shortSignals++;
-    }
-  }
-
-  // 4h momentum for trend confirmation
-  if (state.priceChange4h !== null && state.priceChange4h !== undefined) {
-    if (state.priceChange4h > 1) {
-      score += 10;
-      reasons.push('trend_up_4h');
-      longSignals++;
-    } else if (state.priceChange4h < -1) {
-      score += 5;
-      reasons.push('trend_down_4h');
-      shortSignals++;
-    }
-  }
-
-  // === 3. BTC CORRELATION (77% trade same direction as BTC) ===
-  if (state.btcChange1h !== null && state.btcChange1h !== undefined) {
-    // They're more active when BTC is calm
-    if (state.btcIsCalm) {
-      score += 10;
-      reasons.push('btc_calm');
-    }
-
-    // Same direction as BTC (77% correlation)
-    if (state.btcChange1h > 0.3) {
-      longSignals++;
-      if (state.btcIsCalm) {
-        score += 5;
-        reasons.push('btc_bullish');
-      }
-    } else if (state.btcChange1h < -0.3) {
-      shortSignals++;
-      if (state.btcIsCalm) {
-        reasons.push('btc_bearish');
-      }
-    }
-  }
-
-  // === 4. SESSION AWARENESS ===
-  // Based on cycle analysis: EU entries 71.9% WR, US 62.2%, Asia 26.3%
-  if (STRATEGY.EUROPE_HOURS.includes(hour)) {
-    // Europe session: best entry win rate (71.9%)
-    score += 10;
-    reasons.push('europe_session');
-    longSignals++;
-  } else if (STRATEGY.US_HOURS.includes(hour)) {
-    // US session: decent entry win rate (62.2%)
-    score += 6;
-    reasons.push('us_session');
-  } else if (STRATEGY.ASIA_HOURS.includes(hour)) {
-    // Asia session: worst entry win rate (26.3%)
-    score += 3;
-    reasons.push('asia_session');
-  }
-
-  // === 5. SYMBOL QUALITY ===
-  // Based on cycle analysis: top symbols have 57-86% WR with positive avg P&L
-  if (STRATEGY.TOP_SYMBOLS.includes(symbol)) {
-    score += 10;
-    reasons.push('top_symbol');
-  } else if (STRATEGY.SECONDARY_SYMBOLS.includes(symbol)) {
-    score += 5;
-    reasons.push('secondary_symbol');
-  }
-
-  // === 6. MACD MOMENTUM ===
+  // === 1. MACD — STRONGEST DIRECTIONAL SIGNAL ===
+  // 91% of target's short entries have bearish MACD. This is the #1 filter.
   if (state.macdHist !== null && state.macdHist !== undefined) {
     if (state.macdHist > 0) {
-      score += 5;
+      score += 8;
       reasons.push('macd_bullish');
-      longSignals++;
+      longSignals += 2; // Strong long signal
     } else if (state.macdHist < 0) {
+      score += 5;
       reasons.push('macd_bearish');
-      shortSignals++;
+      shortSignals += 2; // Strong short signal (91% accuracy)
     }
   }
 
-  // === 7. RSI (overbought/oversold) ===
+  // === 2. RSI — BREAKOUT/OVERSOLD DETECTION ===
+  // Target buys at RSI > 70 (breakout buying, 12% of long entries)
+  // Target shorts at RSI 40-60 (momentum loss), NOT at overbought
   if (state.rsi14 !== null && state.rsi14 !== undefined) {
-    if (state.rsi14 < 30) {
-      // Oversold - strong long signal
-      score += 10;
+    if (state.rsi14 > 70) {
+      // RSI > 70 = LONG signal (breakout buyer, not mean reversion)
+      score += 8;
+      reasons.push('rsi_breakout');
+      longSignals += 2;
+    } else if (state.rsi14 < 30) {
+      // Oversold - dip buy opportunity
+      score += 8;
       reasons.push('rsi_oversold');
       longSignals += 2;
-    } else if (state.rsi14 < 40) {
-      // Approaching oversold
-      score += 5;
-      reasons.push('rsi_low');
-      longSignals++;
-    } else if (state.rsi14 > 70) {
-      // Overbought - target often shorts here
-      score += 5;
-      reasons.push('rsi_overbought');
-      shortSignals += 2;
-    } else if (state.rsi14 > 60) {
-      // Approaching overbought
-      reasons.push('rsi_high');
-      shortSignals++;
+    } else if (state.rsi14 >= 40 && state.rsi14 <= 55) {
+      // Mid-range RSI - target's short entry zone (41% of shorts at 50-60)
+      reasons.push('rsi_mid_range');
+      // Don't add signal count — this is confirmatory, not directional
     }
   }
 
-  // === 8. BOLLINGER BAND POSITION ===
+  // === 3. BOLLINGER BAND POSITION ===
+  // Longs: 14% above upper band (breakout), spread across band
+  // Shorts: 38% in 0.2-0.4, 0% above upper band
   if (state.bbUpper !== null && state.bbLower !== null &&
       state.bbUpper !== undefined && state.bbLower !== undefined && state.price) {
     const bbRange = state.bbUpper - state.bbLower!;
     if (bbRange > 0) {
       const bbPosition = (state.price - state.bbLower!) / bbRange;
 
-      if (bbPosition < 0.1) {
-        // Price at or below lower band - mean reversion long
+      if (bbPosition > 1.0) {
+        // Above upper band - strong breakout long (14% of target's long entries)
+        score += 10;
+        reasons.push('bb_breakout_above');
+        longSignals += 2;
+      } else if (bbPosition < 0.1) {
+        // Below lower band - mean reversion long
         score += 10;
         reasons.push('bb_lower_touch');
         longSignals += 2;
-      } else if (bbPosition < 0.3) {
-        score += 5;
-        reasons.push('bb_lower_zone');
-        longSignals++;
-      } else if (bbPosition > 0.9) {
-        // Price at or above upper band - overextended
-        score += 5;
-        reasons.push('bb_upper_touch');
-        shortSignals += 2;
-      } else if (bbPosition > 0.7) {
-        reasons.push('bb_upper_zone');
+      } else if (bbPosition >= 0.2 && bbPosition <= 0.4) {
+        // Target's short entry zone (38% of shorts here)
+        reasons.push('bb_short_zone');
         shortSignals++;
       }
     }
 
-    // BB squeeze detection (low width = imminent breakout)
+    // BB squeeze detection
     if (state.bbWidth !== null && state.bbWidth !== undefined) {
       if (state.bbWidth < 0.02) {
         score += 5;
@@ -269,7 +201,7 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
     }
   }
 
-  // === 9. EMA TREND ===
+  // === 4. EMA TREND ===
   if (state.ema9 !== null && state.ema21 !== null &&
       state.ema9 !== undefined && state.ema21 !== undefined) {
     if (state.ema9 > state.ema21) {
@@ -282,8 +214,62 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
     }
   }
 
-  // === 10. BTC REGIME DETECTION ===
-  // Target flips entire portfolio based on BTC regime
+  // === 5. MOMENTUM CONFIRMATION ===
+  if (state.priceChange1h !== null && state.priceChange1h !== undefined) {
+    if (state.priceChange1h > 0.5) {
+      score += 10;
+      reasons.push('momentum_up');
+      longSignals++;
+    } else if (state.priceChange1h < -0.5) {
+      score += 5;
+      reasons.push('momentum_down');
+      shortSignals++;
+    }
+  }
+
+  if (state.priceChange4h !== null && state.priceChange4h !== undefined) {
+    if (state.priceChange4h > 1) {
+      score += 8;
+      reasons.push('trend_up_4h');
+      longSignals++;
+    } else if (state.priceChange4h < -1) {
+      score += 5;
+      reasons.push('trend_down_4h');
+      shortSignals++;
+    }
+  }
+
+  // === 6. BREAKOUT/DIP from price range ===
+  if (state.pricePosition !== null && state.pricePosition !== undefined) {
+    if (state.pricePosition > STRATEGY.BREAKOUT_THRESHOLD) {
+      score += 10;
+      reasons.push('breakout');
+      longSignals++;
+    } else if (state.pricePosition < STRATEGY.DIP_THRESHOLD) {
+      score += 5;
+      reasons.push('dip');
+      longSignals++;
+    }
+  }
+
+  // === 7. BTC REGIME DETECTION ===
+  // Target flips entire portfolio based on BTC direction
+  if (state.btcChange1h !== null && state.btcChange1h !== undefined) {
+    if (state.btcIsCalm) {
+      score += 5;
+      reasons.push('btc_calm');
+    }
+
+    if (state.btcChange1h > 0.3) {
+      longSignals++;
+      reasons.push('btc_bullish');
+    } else if (state.btcChange1h < -0.3) {
+      shortSignals++;
+      reasons.push('btc_bearish');
+    }
+  }
+
+  // BTC RSI for macro regime
   if (state.btcRsi14 !== null && state.btcRsi14 !== undefined) {
     if (state.btcRsi14 < 30) {
       score += 5;
@@ -295,42 +281,67 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
     }
   }
 
-  // === 11. VOLATILITY (they like volatile assets) ===
+  // === 8. SESSION AWARENESS ===
+  if (STRATEGY.EUROPE_HOURS.includes(hour)) {
+    score += 8;
+    reasons.push('europe_session');
+  } else if (STRATEGY.US_HOURS.includes(hour)) {
+    score += 5;
+    reasons.push('us_session');
+  } else if (STRATEGY.ASIA_HOURS.includes(hour)) {
+    score += 3;
+    reasons.push('asia_session');
+  }
+
+  // === 9. SYMBOL ROLE AWARENESS ===
+  // Based on hedging analysis: some symbols are almost always long or short
+  if (STRATEGY.ALWAYS_LONG_SYMBOLS.includes(symbol)) {
+    score += 5;
+    reasons.push('always_long_symbol');
+    longSignals++;
+  } else if (STRATEGY.MOSTLY_SHORT_SYMBOLS.includes(symbol)) {
+    reasons.push('mostly_short_symbol');
+    shortSignals++;
+  } else if (STRATEGY.TOP_SYMBOLS.includes(symbol)) {
+    score += 5;
+    reasons.push('top_symbol');
+  } else if (STRATEGY.SECONDARY_SYMBOLS.includes(symbol)) {
+    score += 3;
+    reasons.push('secondary_symbol');
+  }
+
+  // === 10. VOLATILITY ===
   if (state.atrPercent !== null && state.atrPercent !== undefined) {
     if (state.atrPercent > 5) {
-      score += 5;
+      score += 3;
       reasons.push('high_volatility');
     }
   }
 
-  // === 12. FUNDING (contrarian signal) ===
+  // === 11. FUNDING ===
   if (state.fundingRate !== null && state.fundingRate !== undefined) {
     if (state.fundingRate > 0.02) {
-      // High positive funding = potential short squeeze
       reasons.push('high_funding_long_bias');
       longSignals++;
     } else if (state.fundingRate < -0.01) {
-      // Negative funding = longs getting paid
       reasons.push('neg_funding_short_bias');
       shortSignals++;
     }
   }
 
   // === DIRECTION DETERMINATION ===
-  // Target is 87.7% long-biased, so tie goes to long
-  // BUT shorts have 89% WR when used (surgical hedges)
   let direction: number | null = null;
   if (longSignals > shortSignals) {
     direction = 1; // Long
   } else if (shortSignals > longSignals) {
     direction = -1; // Short
-    // Short signals get a bonus - target's shorts are 89% WR
-    if (shortSignals >= 3) {
-      score += 5;
-      reasons.push('strong_short_signal');
+    // Short signals get a bonus when MACD confirms (91% accuracy)
+    if (shortSignals >= 3 && state.macdHist !== null && state.macdHist !== undefined && state.macdHist < 0) {
+      score += 8;
+      reasons.push('confirmed_short');
     }
   } else if (longSignals > 0) {
-    // Tie with signals present - bias to long (87.7% historical)
+    // Tie → bias to long (target is net long most of the time)
     direction = 1;
   }
 
