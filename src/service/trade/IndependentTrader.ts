@@ -1,30 +1,37 @@
 /**
- * IndependentTrader v4 - Autonomous trading based on deep target analysis
+ * IndependentTrader v5 - Indicator-based exit strategy
  *
- * Based on analysis of 27K+ fills, 88 complete position cycles:
+ * Based on analysis of 43K+ fills, 109 complete position cycles with
+ * candle-computed indicators at exit time.
  *
- * Entry criteria:
- * - Prediction score >= 90 (very high confidence)
- * - Direction: LONG primary (target 43% WR but high avg P&L)
- *   SHORTS allowed when score >= 95 (target 89% short WR)
- * - Symbol on whitelist (proven target performers)
+ * Entry criteria (unchanged from v4):
+ * - Prediction score >= 90 LONG, >= 95 SHORT
+ * - Symbol on whitelist
  * - No existing position (copy or independent)
- * - Under max allocation limit
+ * - Under max allocation limit (10% of vault)
  *
- * Exit strategy (v4 - trailing stop):
- * - Min hold: 12h (don't exit during noise - sub-12h has -0.55% avg)
- * - After 12h: trailing stop at 3% from peak price
- * - Hard stop: -5% from entry at any time (risk management)
- * - Max hold: 72h (3-7d bucket drops to 33% WR)
- * - Target confirmation/opposite handling unchanged
+ * Exit strategy (v5 - indicator-based, data-driven):
  *
- * v4 changes (2026-03-09):
- * - Hold time: 4h → 12h min / 72h max with trailing stop
- * - Trailing stop: 3% from peak after min hold
- * - Hard stop: -5% from entry (always active)
- * - Whitelist: HYPE, SOL, VVV, ETH, MON, FARTCOIN (from cycle analysis)
- * - Shorts allowed at very high confidence (score >= 95)
- * - Dropped AXS (worst performer in live trading: -$446 net)
+ * LONG exits (from 89 long cycle analysis):
+ * - BB position > 0.8: always loses (0% WR, -23% avg) → exit
+ * - RSI > 70: bad exits (30% WR, -0.9% avg) → exit
+ * - Price below EMA9 AND EMA21: profitable zone (+11.4% avg) → take profit
+ *
+ * SHORT exits (from 19 short cycle analysis):
+ * - BB position 0.4-0.6: best exits (83% WR, +4.2% avg) → take profit at mean
+ * - Price below EMA9 AND EMA21: profitable zone (+3.3% avg) → take profit
+ *
+ * Safety nets (always active):
+ * - Hard stop: -5% from entry
+ * - Max hold: 72h
+ * - Target confirmation/opposite handling
+ *
+ * v5 changes (2026-03-14):
+ * - Replaced trailing stop with indicator-based exits
+ * - LONG: exit on BB > 0.8, RSI > 70, or price < both EMAs (after min hold)
+ * - SHORT: exit on BB 0.4-0.6 (mean reversion), or price < both EMAs
+ * - Removed min hold requirement for indicator exits (signals are reliable)
+ * - Kept hard stop and max hold as safety nets
  */
 
 import dotenv from 'dotenv';
@@ -45,11 +52,15 @@ const CONFIG = {
   MAX_POSITIONS: parseInt(process.env.INDEPENDENT_MAX_POSITIONS || '3', 10),
   LEVERAGE: parseInt(process.env.INDEPENDENT_LEVERAGE || '5', 10),
 
-  // v4: Trailing stop exit strategy
-  MIN_HOLD_HOURS: parseInt(process.env.INDEPENDENT_MIN_HOLD_HOURS || '12', 10),
+  // v5: Indicator-based exit strategy
   MAX_HOLD_HOURS: parseInt(process.env.INDEPENDENT_MAX_HOLD_HOURS || '72', 10),
-  TRAILING_STOP_PCT: parseFloat(process.env.INDEPENDENT_TRAILING_STOP_PCT || '0.03'),  // 3% from peak
   HARD_STOP_PCT: parseFloat(process.env.INDEPENDENT_HARD_STOP_PCT || '0.05'),          // -5% from entry
+
+  // Indicator exit thresholds (from 109 cycle analysis)
+  EXIT_BB_UPPER: 0.8,    // LONG: BB > 0.8 = 0% WR, -23% avg → exit
+  EXIT_RSI_HIGH: 70,     // LONG: RSI > 70 = 30% WR, -0.9% avg → exit
+  EXIT_BB_MEAN_LOW: 0.4, // SHORT: BB 0.4-0.6 = 83% WR → take profit at mean
+  EXIT_BB_MEAN_HIGH: 0.6,
 
   // Score thresholds
   MIN_SCORE_LONG: 90,
@@ -59,9 +70,6 @@ const CONFIG = {
   // HYPE: 69% WR, ETH: 82% WR, SOL: 86% WR, VVV: 75% WR, MON: 75% WR, FARTCOIN: 57% WR
   WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'MON', 'FARTCOIN'],
 };
-
-// In-memory peak price tracking for trailing stops
-const peakPrices = new Map<string, number>();
 
 export class IndependentTrader {
   /**
@@ -195,7 +203,7 @@ export class IndependentTrader {
 
   /**
    * Manage existing independent positions
-   * v4: Trailing stop after min hold, hard stop always, max hold timeout
+   * v5: Indicator-based exits (BB, RSI, EMA), hard stop, max hold
    */
   static async managePositions(
     allMarkets: Record<string, string>,
@@ -237,7 +245,6 @@ export class IndependentTrader {
         const targetPos = targetPositionMap.get(pos.symbol);
         if (targetPos) {
           if (targetPos.side === pos.side) {
-            // Target opened same direction - mark as confirmed
             if (!pos.confirmedByTarget) {
               await prisma.independentPosition.update({
                 where: { id: pos.id },
@@ -245,57 +252,77 @@ export class IndependentTrader {
               });
               logger.info(`✅ ${pos.symbol}: Independent position CONFIRMED by target (same direction)`);
             }
-            // Copy trading will now manage this position
             continue;
           } else {
-            // Target opened opposite direction - close our position
             await this.closePosition(pos, currentPrice, 'target_opposite');
-            peakPrices.delete(pos.symbol);
             continue;
           }
         }
 
-        // === 2. UPDATE PEAK PRICE for trailing stop ===
-        const holdTimeMs = Date.now() - pos.createdAt.getTime();
-        const currentPeak = peakPrices.get(pos.symbol) || pos.entryPrice;
-        if (pos.side === 'long' && currentPrice > currentPeak) {
-          peakPrices.set(pos.symbol, currentPrice);
-        } else if (pos.side === 'short' && currentPrice < currentPeak) {
-          peakPrices.set(pos.symbol, currentPrice);
-        } else if (!peakPrices.has(pos.symbol)) {
-          peakPrices.set(pos.symbol, pos.entryPrice);
-        }
-        const peak = peakPrices.get(pos.symbol)!;
-
-        // === 3. HARD STOP - always active (-5% from entry) ===
+        // === 2. HARD STOP - always active (-5% from entry) ===
         const pnlFromEntry = pos.side === 'long'
           ? (currentPrice - pos.entryPrice) / pos.entryPrice
           : (pos.entryPrice - currentPrice) / pos.entryPrice;
 
         if (pnlFromEntry <= -CONFIG.HARD_STOP_PCT) {
           await this.closePosition(pos, currentPrice, 'hard_stop');
-          peakPrices.delete(pos.symbol);
           continue;
         }
 
-        // === 4. MAX HOLD TIMEOUT ===
+        // === 3. MAX HOLD TIMEOUT ===
+        const holdTimeMs = Date.now() - pos.createdAt.getTime();
         const maxHoldMs = CONFIG.MAX_HOLD_HOURS * 60 * 60 * 1000;
         if (holdTimeMs >= maxHoldMs) {
           await this.closePosition(pos, currentPrice, 'timeout');
-          peakPrices.delete(pos.symbol);
           continue;
         }
 
-        // === 5. TRAILING STOP - only after min hold period ===
-        const minHoldMs = CONFIG.MIN_HOLD_HOURS * 60 * 60 * 1000;
-        if (holdTimeMs >= minHoldMs) {
-          const dropFromPeak = pos.side === 'long'
-            ? (peak - currentPrice) / peak
-            : (currentPrice - peak) / peak;
+        // === 4. INDICATOR-BASED EXITS ===
+        const indicators = await this.getLatestIndicators(pos.symbol);
+        if (!indicators) {
+          continue; // No indicator data yet, rely on hard stop / timeout
+        }
 
-          if (dropFromPeak >= CONFIG.TRAILING_STOP_PCT) {
-            await this.closePosition(pos, currentPrice, 'trailing_stop');
-            peakPrices.delete(pos.symbol);
+        const { rsi14, bbPosition, ema9, ema21 } = indicators;
+
+        if (pos.side === 'long') {
+          // LONG exit signals (from 89 long cycle analysis):
+
+          // BB > 0.8: 0% win rate, -23% avg → exit immediately
+          if (bbPosition !== null && bbPosition > CONFIG.EXIT_BB_UPPER) {
+            logger.info(`📊 ${pos.symbol}: BB position ${bbPosition.toFixed(2)} > ${CONFIG.EXIT_BB_UPPER} → exit long`);
+            await this.closePosition(pos, currentPrice, 'indicator_bb_upper');
+            continue;
+          }
+
+          // RSI > 70: 30% win rate, -0.9% avg → exit
+          if (rsi14 !== null && rsi14 > CONFIG.EXIT_RSI_HIGH) {
+            logger.info(`📊 ${pos.symbol}: RSI ${rsi14.toFixed(1)} > ${CONFIG.EXIT_RSI_HIGH} → exit long`);
+            await this.closePosition(pos, currentPrice, 'indicator_rsi_high');
+            continue;
+          }
+
+          // Price below both EMAs: profitable zone (+11.4% avg) → take profit if in profit
+          if (ema9 !== null && ema21 !== null && currentPrice < ema9 && currentPrice < ema21 && pnlFromEntry > 0) {
+            logger.info(`📊 ${pos.symbol}: Price $${currentPrice.toFixed(2)} below EMA9 ($${ema9.toFixed(2)}) & EMA21 ($${ema21.toFixed(2)}), P&L +${(pnlFromEntry * 100).toFixed(2)}% → take profit`);
+            await this.closePosition(pos, currentPrice, 'indicator_ema_tp');
+            continue;
+          }
+
+        } else {
+          // SHORT exit signals (from 19 short cycle analysis):
+
+          // BB 0.4-0.6 (mean): 83% win rate, +4.2% avg → take profit at mean
+          if (bbPosition !== null && bbPosition >= CONFIG.EXIT_BB_MEAN_LOW && bbPosition <= CONFIG.EXIT_BB_MEAN_HIGH && pnlFromEntry > 0) {
+            logger.info(`📊 ${pos.symbol}: BB position ${bbPosition.toFixed(2)} in mean zone [${CONFIG.EXIT_BB_MEAN_LOW}-${CONFIG.EXIT_BB_MEAN_HIGH}], P&L +${(pnlFromEntry * 100).toFixed(2)}% → take profit short`);
+            await this.closePosition(pos, currentPrice, 'indicator_bb_mean');
+            continue;
+          }
+
+          // Price below both EMAs: profitable zone (+3.3% avg) → take profit if in profit
+          if (ema9 !== null && ema21 !== null && currentPrice < ema9 && currentPrice < ema21 && pnlFromEntry > 0) {
+            logger.info(`📊 ${pos.symbol}: Price $${currentPrice.toFixed(2)} below EMA9 & EMA21, P&L +${(pnlFromEntry * 100).toFixed(2)}% → take profit short`);
+            await this.closePosition(pos, currentPrice, 'indicator_ema_tp');
             continue;
           }
         }
@@ -303,6 +330,56 @@ export class IndependentTrader {
 
     } catch (error: any) {
       logger.error(`IndependentTrader.managePositions error: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetch latest indicators for a symbol from the DB
+   * Returns BB position, RSI, EMAs computed by MarketDataCollector
+   */
+  private static async getLatestIndicators(symbol: string): Promise<{
+    rsi14: number | null;
+    bbPosition: number | null;
+    ema9: number | null;
+    ema21: number | null;
+  } | null> {
+    try {
+      const indicator = await prisma.technicalIndicator.findFirst({
+        where: { symbol, timeframe: '1h' },
+        orderBy: { timestamp: 'desc' },
+      });
+
+      if (!indicator) return null;
+
+      // Check freshness — indicator should be less than 2 hours old
+      const ageMs = Date.now() - indicator.timestamp.getTime();
+      if (ageMs > 2 * 60 * 60 * 1000) return null;
+
+      const bbUpper = indicator.bbUpper;
+      const bbLower = indicator.bbLower;
+      let bbPosition: number | null = null;
+
+      if (bbUpper !== null && bbLower !== null && bbUpper !== bbLower) {
+        // Get current price from the indicator's close approximation (ema9 is close to price)
+        // We'll compute BB position using the latest candle close
+        const latestCandle = await prisma.candle.findFirst({
+          where: { symbol, timeframe: '1h' },
+          orderBy: { timestamp: 'desc' },
+        });
+        if (latestCandle) {
+          bbPosition = (latestCandle.close - bbLower) / (bbUpper - bbLower);
+        }
+      }
+
+      return {
+        rsi14: indicator.rsi14,
+        bbPosition,
+        ema9: indicator.ema9,
+        ema21: indicator.ema21,
+      };
+    } catch (error: any) {
+      logger.error(`Failed to fetch indicators for ${symbol}: ${error.message}`);
+      return null;
     }
   }
 
@@ -347,9 +424,6 @@ export class IndependentTrader {
         price
       );
 
-      // Initialize peak price tracking
-      peakPrices.set(symbol, price);
-
       // Record in database
       await prisma.independentPosition.create({
         data: {
@@ -370,7 +444,7 @@ export class IndependentTrader {
       });
 
       const dirLabel = isLong ? 'LONG' : 'SHORT';
-      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN ${dirLabel} ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, $${notionalUsd.toFixed(0)} notional, trailing stop ${(CONFIG.TRAILING_STOP_PCT*100)}% after ${CONFIG.MIN_HOLD_HOURS}h, hard stop ${(CONFIG.HARD_STOP_PCT*100)}%, max ${CONFIG.MAX_HOLD_HOURS}h, score: ${score})`);
+      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN ${dirLabel} ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, $${notionalUsd.toFixed(0)} notional, indicator exits + hard stop ${(CONFIG.HARD_STOP_PCT*100)}%, max ${CONFIG.MAX_HOLD_HOURS}h, score: ${score})`);
 
     } catch (error: any) {
       logger.error(`❌ ${symbol}: Independent open failed - ${error.message}`);
@@ -430,7 +504,10 @@ export class IndependentTrader {
 
       const pnlEmoji = realizedPnl >= 0 ? '💰' : '📉';
       const reasonEmoji: Record<string, string> = {
-        trailing_stop: '📐',
+        indicator_bb_upper: '📊',
+        indicator_bb_mean: '📊',
+        indicator_rsi_high: '📊',
+        indicator_ema_tp: '📊',
         hard_stop: '🛑',
         timeout: '⏰',
         target_confirmed: '✅',
@@ -488,8 +565,6 @@ export class IndependentTrader {
         status: 'confirmed',
       },
     });
-    // Clean up peak price tracking - copy trading takes over
-    peakPrices.delete(symbol);
   }
 
   /**
