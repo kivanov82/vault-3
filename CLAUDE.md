@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
-**Project Status:** Phase 4 - Independent Trading System
-**Last Updated:** 2026-02-04
+**Project Status:** Phase 5 - Optimization & Scaling
+**Last Updated:** 2026-03-15
 
 ---
 
@@ -56,25 +56,40 @@ Autonomous trading based on high-confidence prediction signals, running alongsid
 ### How It Works
 
 ```
-Signal Detection (score ≥ 90, LONG only, whitelist symbol)
+Signal Detection (score ≥ 90 LONG / ≥ 95 SHORT, whitelist symbol)
     ↓
   OPEN position → Check every 5 min:
     ├─ Target confirmed same direction? → Hand to copy trading
     ├─ Target opened opposite? → Close immediately
-    └─ Time ≥ 4h? → Close at market (v3: time-based exit)
+    ├─ Hard stop: -5% from entry → Close immediately
+    ├─ Indicator exit signal? → Close (BB/RSI/EMA based)
+    └─ Max hold 72h? → Close at market
 ```
 
 ### Parameters
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Max allocation | 10% of vault | v2: increased from 3% |
+| Max allocation | 10% of vault | On top of copy trading allocation |
 | Max positions | 3 concurrent | ~3.3% each |
-| Min score | 90 | Very high confidence only |
-| Direction | LONG only | Shorts have 0% historical win rate |
+| Min score (LONG) | 90 | Very high confidence only |
+| Min score (SHORT) | 95 | Higher bar for shorts |
 | Leverage | 5x | Matches target avg (4.8x rounded) |
-| Exit strategy | 4h fixed hold | v3: no TP/SL, paper shows 99% win rate |
-| Whitelist | VVV, AXS, LDO, AAVE, XMR, GRASS, SKY, ZORA, kPEPE, BERA | Added kPEPE/BERA, removed IP |
+| Copy scale | +30% (1.3x) | COPY_SCALE_MULTIPLIER=1.3 |
+| Exit strategy | v5: indicator-based | BB, RSI, EMA signals + hard stop + timeout |
+| Whitelist | HYPE, SOL, VVV, ETH, MON, FARTCOIN | From cycle analysis |
+
+### Exit Strategy (v5 - Indicator-Based)
+
+| Signal | Direction | Condition | Data Basis |
+|--------|-----------|-----------|------------|
+| BB Upper | LONG exit | BB position > 0.8 | 0% WR, -23% avg at upper band |
+| RSI High | LONG exit | RSI > 70 | 30% WR, -0.9% avg overbought |
+| EMA TP | LONG exit | Price < EMA9 AND EMA21 + in profit | +11.4% avg P&L below both EMAs |
+| BB Mean | SHORT exit | BB 0.4-0.6 + in profit | 83% WR, +4.2% avg at mean |
+| EMA TP | SHORT exit | Price < EMA9 AND EMA21 + in profit | +3.3% avg P&L |
+| Hard Stop | Both | -5% from entry | Safety net |
+| Timeout | Both | 72h max hold | Safety net |
 
 ### Conflict Resolution
 
@@ -92,9 +107,9 @@ npm run ml:independent-stats   # View independent trading performance
 
 ---
 
-## Shadow Mode Prediction System (v2 - Momentum)
+## Prediction System (v5 - Indicator + Macro Regime)
 
-The bot runs predictions alongside copy trading using signals aligned with target vault behavior.
+The bot runs predictions alongside copy trading using indicator signals and BTC macro regime detection.
 
 ### How It Works
 
@@ -102,31 +117,49 @@ Every 5 minutes (integrated into copy trading cycle):
 
 ```
 1. Fetch target & our positions
-2. Update market data for active symbols
-3. 🔮 Run momentum-based predictions BEFORE copy actions
-   - Score each symbol (0-100)
-   - Predict direction (long/short) based on momentum signals
-   - Log with entry price
+2. Collect market data (210 candles per symbol, indicators)
+3. 🔮 Run predictions BEFORE copy actions
+   - Detect BTC macro regime (bull/bear/neutral)
+   - Score each symbol (0-100) with indicator signals
+   - Predict direction (long/short)
 4. 🎯 Process independent trading signals (if enabled)
-5. Execute copy trades (unchanged behavior)
-6. Log actual action taken for each prediction
-7. Every 4 hours: Validate paper P&L (longer window for momentum strategy)
+5. 📊 Manage independent positions (indicator-based exits)
+6. Execute copy trades (unchanged behavior)
+7. Every 36 hours: Validate paper P&L
 ```
 
-### Prediction Scoring (Momentum v2)
+### BTC Macro Regime Detection (v5)
 
-| Factor | Points | Condition |
-|--------|--------|-----------|
-| Breakout | +20 | Price in upper 30% of recent range |
-| Momentum Up | +15 | 1h price change > 0.5% |
-| Trend Confirmation | +10 | 4h price change > 1% |
-| BTC Calm | +10 | BTC move < 1% (they trade more when BTC stable) |
-| Session Bias | +3 to +10 | Asia (+10), EU (+8), US (+3) |
-| Top Symbol | +10 | HYPE, VVV, SKY, MON, SPX, FARTCOIN, PUMP |
-| Basket Symbol | +5 | Correlated memecoins traded together |
-| MACD Bullish | +5 | MACD histogram > 0 |
-| High Volatility | +5 | ATR > 5% |
-| Dip Buy | +5 | Price in lower 30% (they still buy some dips) |
+Target shifted $1.8M long → $10.4M short when BTC dropped 24% ($92K→$70K).
+
+| Signal | Bearish | Bullish |
+|--------|---------|---------|
+| BTC vs EMA50 | Below (-1) | Above (+1) |
+| BTC vs EMA200 | Below (-1) | Above (+1) |
+| BTC MACD | Bearish (-1) | Bullish (+1) |
+| BTC 7d change | < -5% (-2) | > +5% (+2) |
+| BTC RSI | < 30 (bounce +1) | > 70 (noted) |
+
+Score <= -2 = **bear regime** (+10 score, +2 short signals, tie→short)
+Score >= +2 = **bull regime** (+10 score, +2 long signals, tie→long)
+
+### Prediction Scoring (v5)
+
+| Factor | Points | Direction | Condition |
+|--------|--------|-----------|-----------|
+| MACD bullish | +8 | LONG x2 | MACD histogram > 0 (strongest signal) |
+| MACD bearish | +5 | SHORT x2 | MACD histogram < 0 (91% accuracy) |
+| RSI breakout | +8 | LONG x2 | RSI > 70 (breakout buyer) |
+| RSI oversold | +8 | LONG x2 | RSI < 30 |
+| BB breakout | +10 | LONG x2 | Price above upper BB |
+| BB lower touch | +10 | LONG x2 | Price below lower BB |
+| BB short zone | - | SHORT | BB position 0.2-0.4 (38% of shorts) |
+| EMA bullish | +3 | LONG | EMA9 > EMA21 |
+| Momentum 1h | +10/+5 | LONG/SHORT | 1h change > 0.5% / < -0.5% |
+| Trend 4h | +8/+5 | LONG/SHORT | 4h change > 1% / < -1% |
+| Macro regime | +10 | LONG or SHORT | Bull/bear regime detection |
+| Session | +3-8 | - | EU (+8), US (+5), Asia (+3) |
+| Confirmed short | +8 | SHORT | 3+ short signals + MACD bearish |
 
 **Base score:** 50 | **High confidence:** ≥ 65 | **Independent threshold:** ≥ 80
 
@@ -354,19 +387,21 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 - [x] Rewrote predictions with momentum signals (v2)
 - [x] Momentum-v2 prediction data collection
 
-### Phase 4: Independent Trading (Current)
+### Phase 4: Independent Trading ✅ Complete
 
-- [x] IndependentTrader module with TP/SL/timeout
-- [x] High-confidence signal filtering (score ≥ 80)
-- [x] Whitelist-based symbol selection
+- [x] IndependentTrader module (v1-v5 iterations)
+- [x] High-confidence signal filtering (score ≥ 90 LONG, ≥ 95 SHORT)
+- [x] Whitelist-based symbol selection (HYPE, SOL, VVV, ETH, MON, FARTCOIN)
 - [x] Target confirmation handling
 - [x] Conflict resolution with copy trading
-- [ ] Collect performance data
-- [ ] Validate win rates by symbol/score
-- [ ] Refine parameters based on results
+- [x] Indicator-based exit strategy (v5: BB, RSI, EMA signals)
+- [x] BTC macro regime detection (EMA50, EMA200, 7d change)
+- [x] Live market data collection (210 candles, full indicator suite)
 
-### Phase 5: Hybrid/Independent Trading (Planned)
+### Phase 5: Optimization & Scaling (Current)
 
+- [ ] Collect v5 performance data (indicator-based exits)
+- [ ] Validate macro regime accuracy
 - [ ] Increase independent allocation based on proven accuracy
 - [ ] Gradual transition from copy to autonomous
 - [ ] Full autonomy when Sharpe ≥ 1.5
@@ -374,6 +409,42 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 ---
 
 ## Changelog
+
+### 2026-03-15 - Prediction v5: BTC Macro Regime Detection
+
+Target shifted $1.8M long → $10.4M short when BTC dropped 24% ($92K→$70K).
+Added macro regime detector using BTC EMA50, EMA200, 7d change, MACD.
+
+- ✅ Bear regime: strong short bias (+10 score, +2 short signals)
+- ✅ Bull regime: strong long bias (+10 score, +2 long signals)
+- ✅ Tie-breaker flips from long→short in bear regime
+- ✅ Increased candle fetch from 60→210 for EMA200 computation
+
+### 2026-03-14 - Independent Trading v5: Indicator-Based Exits
+
+Analysis of 109 position cycles with candle-computed indicators showed
+no fixed TP/SL, discretionary exits correlated with BB/RSI/EMA signals.
+
+- ✅ LONG exits: BB > 0.8 (0% WR), RSI > 70 (30% WR), price < EMA9+21 (TP)
+- ✅ SHORT exits: BB 0.4-0.6 mean (83% WR), price < EMA9+21 (TP)
+- ✅ Safety nets: -5% hard stop, 72h max hold
+- ✅ Removed trailing stop, min hold, peak price tracking
+
+### 2026-03-14 - Live Market Data Collection + Prediction v4
+
+- ✅ Created MarketDataCollector (fetches candles, computes indicators)
+- ✅ MACD is #1 signal (91% accurate for shorts, weighted 2x)
+- ✅ RSI > 70 = LONG signal (breakout buyer, reversed from standard)
+- ✅ BB position scoring based on 454 matched indicator events
+- ✅ Symbol role awareness (always-long vs mostly-short)
+
+### 2026-03-09 - Independent Trading v4: Trailing Stop
+
+- ✅ Hold time: 4h → 12h min / 72h max with trailing stop
+- ✅ Trailing stop: 3% from peak after min hold
+- ✅ Hard stop: -5% from entry (always active)
+- ✅ Whitelist: HYPE, SOL, VVV, ETH, MON, FARTCOIN
+- ✅ Shorts allowed at very high confidence (score >= 95)
 
 ### 2026-02-10 - Independent Trading v3 (Time-Based Exit)
 
@@ -447,10 +518,11 @@ Hypothesis: TP/SL triggers on volatility before the predicted move completes.
 
 ## Next Steps
 
-1. **Monitor** independent trading via `npm run ml:independent-stats`
-2. **Track** TP/SL/timeout exits and win rates by symbol
-3. **Analyze** performance after 1-2 weeks
-4. **Adjust** parameters based on results (score threshold, whitelist, TP/SL levels)
+1. **Monitor** v5 indicator-based exits via `npm run ml:independent-stats`
+2. **Validate** macro regime detection accuracy (bear/bull calls)
+3. **Track** indicator exit reasons (BB/RSI/EMA) win rates
+4. **Evaluate** whether to increase independent allocation
+5. **Consider** shorter hold times to match target's scalping style (86% exits < 1h)
 
 ---
 
