@@ -12,8 +12,8 @@ import { logger } from '../utils/logger';
 import { HyperliquidConnector } from '../trade/HyperliquidConnector';
 import { calculateAllIndicators, type OHLCV } from '../utils/indicators';
 
-// How many 1h candles to fetch per symbol (need 50+ for EMA50, 26+ for MACD)
-const CANDLE_COUNT = 60;
+// How many 1h candles to fetch per symbol (need 200+ for EMA200, 50+ for EMA50, 26+ for MACD)
+const CANDLE_COUNT = 210;
 
 // Throttle: don't re-fetch a symbol if we fetched it less than 30 min ago
 const FETCH_COOLDOWN_MS = 30 * 60 * 1000;

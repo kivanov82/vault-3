@@ -27,8 +27,15 @@
  * - MACD heavily weighted for short signals (91% accuracy)
  * - RSI scoring adjusted: >70 is long signal (breakout), not short
  * - BB lower touch is strong long signal, upper zone is weak short
- * - BTC RSI for macro regime detection
  * - Symbol roles updated from hedging analysis
+ *
+ * v5 changes (Mar 14 2026):
+ * - Added BTC macro regime detector (EMA50, EMA200, 7d change, MACD)
+ * - Target shifted $1.8M long → $10.4M short when BTC dropped 24% ($92K→$70K)
+ * - Bear regime (BTC < EMA50+200 + bearish MACD + weekly dump): strong short bias
+ * - Bull regime (BTC > EMA50+200 + bullish MACD + weekly pump): strong long bias
+ * - Tie-breaker flips from long to short in bear regime
+ * - Macro regime signals weighted heavily (+10 score, +2 direction signals)
  */
 
 import { prisma } from '../utils/db';
@@ -110,6 +117,12 @@ interface MarketState {
   // BTC indicators (for regime detection)
   btcRsi14?: number | null;
   btcBbPosition?: number | null;
+  // BTC macro regime (EMA trend)
+  btcPrice?: number | null;
+  btcEma50?: number | null;
+  btcEma200?: number | null;
+  btcMacdHist?: number | null;
+  btcChange7d?: number | null;
   // Funding
   fundingRate?: number | null;
 }
@@ -252,32 +265,96 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
     }
   }
 
-  // === 7. BTC REGIME DETECTION ===
-  // Target flips entire portfolio based on BTC direction
-  if (state.btcChange1h !== null && state.btcChange1h !== undefined) {
-    if (state.btcIsCalm) {
-      score += 5;
-      reasons.push('btc_calm');
-    }
+  // === 7. BTC MACRO REGIME DETECTION ===
+  // Target shifted entire portfolio to short when BTC dropped 24% ($92K → $70K).
+  // They flip based on BTC macro trend, not just short-term moves.
+  //
+  // Regime logic:
+  // - BTC below EMA50 AND EMA200 = bear regime → strong short bias
+  // - BTC below EMA50 only = weakening → mild short bias
+  // - BTC above EMA50 AND EMA200 = bull regime → long bias
+  // - BTC 7-day change < -5% = active selloff → short bias
+  // - BTC MACD bearish = confirming downtrend
 
-    if (state.btcChange1h > 0.3) {
-      longSignals++;
-      reasons.push('btc_bullish');
-    } else if (state.btcChange1h < -0.3) {
-      shortSignals++;
-      reasons.push('btc_bearish');
+  let macroRegime: 'bull' | 'bear' | 'neutral' = 'neutral';
+  let regimeSignals = 0; // negative = bearish, positive = bullish
+
+  if (state.btcPrice && state.btcEma50) {
+    if (state.btcPrice < state.btcEma50) {
+      regimeSignals--;
+      reasons.push('btc_below_ema50');
+    } else {
+      regimeSignals++;
     }
   }
 
-  // BTC RSI for macro regime
+  if (state.btcPrice && state.btcEma200) {
+    if (state.btcPrice < state.btcEma200) {
+      regimeSignals--;
+      reasons.push('btc_below_ema200');
+    } else {
+      regimeSignals++;
+    }
+  }
+
+  if (state.btcMacdHist !== null && state.btcMacdHist !== undefined) {
+    if (state.btcMacdHist < 0) {
+      regimeSignals--;
+      reasons.push('btc_macd_bearish');
+    } else {
+      regimeSignals++;
+    }
+  }
+
+  if (state.btcChange7d !== null && state.btcChange7d !== undefined) {
+    if (state.btcChange7d < -5) {
+      regimeSignals -= 2; // Strong bearish signal
+      reasons.push('btc_weekly_dump');
+    } else if (state.btcChange7d > 5) {
+      regimeSignals += 2;
+      reasons.push('btc_weekly_pump');
+    }
+  }
+
   if (state.btcRsi14 !== null && state.btcRsi14 !== undefined) {
     if (state.btcRsi14 < 30) {
-      score += 5;
       reasons.push('btc_oversold');
-      longSignals++;
+      // Oversold can mean bounce → slight long signal
+      regimeSignals++;
     } else if (state.btcRsi14 > 70) {
       reasons.push('btc_overbought');
+    }
+  }
+
+  // Determine regime
+  if (regimeSignals <= -2) {
+    macroRegime = 'bear';
+    // Bear regime: strong short bias across all assets
+    // Target went from $1.8M long → $10.4M short in 1 week during bear regime
+    score += 10;
+    shortSignals += 2;
+    reasons.push('macro_bear_regime');
+  } else if (regimeSignals >= 2) {
+    macroRegime = 'bull';
+    score += 10;
+    longSignals += 2;
+    reasons.push('macro_bull_regime');
+  } else {
+    // Neutral / transitional — slight bonus for any direction, BTC calm helps
+    if (state.btcIsCalm) {
+      score += 3;
+      reasons.push('btc_calm');
+    }
+  }
+
+  // Short-term BTC momentum (in addition to macro regime)
+  if (state.btcChange1h !== null && state.btcChange1h !== undefined) {
+    if (state.btcChange1h > 0.3) {
+      longSignals++;
+      reasons.push('btc_1h_up');
+    } else if (state.btcChange1h < -0.3) {
       shortSignals++;
+      reasons.push('btc_1h_down');
     }
   }
 
@@ -341,8 +418,14 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
       reasons.push('confirmed_short');
     }
   } else if (longSignals > 0) {
-    // Tie → bias to long (target is net long most of the time)
-    direction = 1;
+    // Tie → bias depends on macro regime
+    // Target flips entire portfolio based on BTC macro trend
+    if (macroRegime === 'bear') {
+      direction = -1; // Bear regime: tie goes to short
+      reasons.push('tie_bear_short');
+    } else {
+      direction = 1; // Bull/neutral: tie goes to long
+    }
   }
 
   return { score, direction, reasons };
@@ -419,6 +502,11 @@ export class PredictionLogger {
     });
 
     const btcRsi14 = btcIndicator?.rsi14 ?? null;
+    const btcMacdHist = btcIndicator?.macdHist ?? null;
+    const btcEma50 = btcIndicator?.ema50 ?? null;
+    const btcEma200 = btcIndicator?.ema200 ?? null;
+    const btcPrice = btcCandles.length > 0 ? btcCandles[0].close : null;
+
     let btcBbPosition: number | null = null;
     if (btcIndicator?.bbUpper && btcIndicator?.bbLower && btcCandles.length > 0) {
       const bbRange = btcIndicator.bbUpper - btcIndicator.bbLower;
@@ -426,6 +514,16 @@ export class PredictionLogger {
         btcBbPosition = (btcCandles[0].close - btcIndicator.bbLower) / bbRange;
       }
     }
+
+    // BTC 7-day change for macro regime detection
+    const btcCandles7d = await prisma.candle.findMany({
+      where: { symbol: 'BTC', timeframe: '1h' },
+      orderBy: { timestamp: 'desc' },
+      take: 168, // 7 days * 24h
+    });
+    const btcChange7d = btcCandles7d.length >= 168
+      ? ((btcCandles7d[0].close - btcCandles7d[167].close) / btcCandles7d[167].close) * 100
+      : null;
 
     for (const symbol of symbols) {
       try {
@@ -485,6 +583,11 @@ export class PredictionLogger {
           btcIsCalm,
           btcRsi14,
           btcBbPosition,
+          btcPrice,
+          btcEma50,
+          btcEma200,
+          btcMacdHist,
+          btcChange7d,
           fundingRate: funding?.rate ?? null,
         };
 
