@@ -545,7 +545,8 @@ export class CopyTradingManager {
     }
 
     /**
-     * Log copy trade to database with latency tracking
+     * Log copy trade to database with latency tracking.
+     * For close/flip actions, also update the original open trade with exit price and P&L.
      */
     private static async logCopyTrade(
         symbol: string,
@@ -574,9 +575,63 @@ export class CopyTradingManager {
                 },
             });
 
-            // Removed verbose log - trade is already logged in execution
+            // On close/flip, find the original open trade and record exit P&L
+            if (action === 'close' || action === 'flip') {
+                await this.updateOpenTradeWithPnl(symbol, side, price);
+            }
         } catch (error: any) {
             logger.error(`Failed to log trade for ${symbol}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Find the most recent open trade for a symbol and update it with exit price and P&L
+     */
+    private static async updateOpenTradeWithPnl(
+        symbol: string,
+        closedSide: string,
+        exitPrice: number
+    ) {
+        try {
+            // Find the most recent open trade for this symbol that hasn't been closed yet
+            const openTrade = await prisma.trade.findFirst({
+                where: {
+                    trader: 'us',
+                    symbol,
+                    side: closedSide,
+                    exitPrice: null,
+                    isCopyTrade: true,
+                },
+                orderBy: { timestamp: 'desc' },
+            });
+
+            if (!openTrade) return;
+
+            const entryPrice = openTrade.entryPrice;
+            const tradeSize = openTrade.size;
+            const tradeLeverage = openTrade.leverage || 1;
+
+            // P&L calculation: (exit - entry) * size for longs, (entry - exit) * size for shorts
+            const priceDiff = exitPrice - entryPrice;
+            const pnl = closedSide === 'long'
+                ? priceDiff * tradeSize
+                : -priceDiff * tradeSize;
+            const pnlPercent = (priceDiff / entryPrice) * 100 * (closedSide === 'long' ? 1 : -1);
+            const holdTimeSeconds = Math.round((Date.now() - openTrade.timestamp.getTime()) / 1000);
+
+            await prisma.trade.update({
+                where: { id: openTrade.id },
+                data: {
+                    exitPrice,
+                    pnl,
+                    pnlPercent: pnlPercent,
+                    holdTimeSeconds,
+                },
+            });
+
+            logger.info(`📊 ${symbol}: P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%) held ${Math.round(holdTimeSeconds / 60)}m`);
+        } catch (error: any) {
+            logger.error(`Failed to update P&L for ${symbol}: ${error.message}`);
         }
     }
 }
