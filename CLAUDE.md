@@ -76,7 +76,7 @@ Signal Detection (score ≥ 90 LONG / ≥ 95 SHORT, whitelist symbol)
 | Min score (SHORT) | 95 | Higher bar for shorts |
 | Leverage | 5x | Matches target avg (4.8x rounded) |
 | Copy scale | +30% (1.3x) | COPY_SCALE_MULTIPLIER=1.3 |
-| Exit strategy | v5: indicator-based | BB, RSI, EMA signals + hard stop + timeout |
+| Exit strategy | v5.1: indicator-based | BB, RSI, EMA signals (30min min hold) + hard stop + timeout |
 | Whitelist | HYPE, SOL, VVV, ETH, MON, FARTCOIN | From cycle analysis |
 
 ### Exit Strategy (v5 - Indicator-Based)
@@ -88,7 +88,7 @@ Signal Detection (score ≥ 90 LONG / ≥ 95 SHORT, whitelist symbol)
 | EMA TP | LONG exit | Price < EMA9 AND EMA21 + in profit | +11.4% avg P&L below both EMAs |
 | BB Mean | SHORT exit | BB 0.4-0.6 + in profit | 83% WR, +4.2% avg at mean |
 | EMA TP | SHORT exit | Price < EMA9 AND EMA21 + in profit | +3.3% avg P&L |
-| Hard Stop | Both | -5% from entry | Safety net |
+| Hard Stop | Both | -10% from entry | Target median loss -4%, avg -8%; only 11% beyond -10% |
 | Timeout | Both | 72h max hold | Safety net |
 
 ### Conflict Resolution
@@ -329,6 +329,7 @@ INDEPENDENT_MAX_POSITIONS=3           # Max concurrent positions
 INDEPENDENT_LEVERAGE=5                # 5x leverage
 INDEPENDENT_USE_TIME_EXIT=true        # v3: time-based exit (no TP/SL)
 INDEPENDENT_HOLD_HOURS=4              # v3: 4h fixed hold
+INDEPENDENT_HARD_STOP_PCT=0.10        # -10% price move hard stop (target median loss -4%, avg -8%)
 INDEPENDENT_TP_PCT=0.20               # only used if USE_TIME_EXIT=false
 INDEPENDENT_SL_PCT=0.12               # only used if USE_TIME_EXIT=false
 
@@ -409,6 +410,21 @@ DATABASE_URL=postgresql://user:pass@host:5432/db
 ---
 
 ## Changelog
+
+### 2026-03-31 - Independent Trading v5.1: Fix instant-close bug + hard stop adjustment
+
+Analysis of 796 independent positions revealed 67% (533) were opened and immediately
+closed in the same cycle with 0% P&L due to contradictory entry/exit signals:
+- Entry: BB breakout (bbPosition > 1.0) scored +10 points → opened position
+- Exit: BB > 0.8 check fired immediately in managePositions() → closed at same price
+
+Hard stop was also too tight: -5% price move = -25% margin loss at 5x leverage.
+Target trader data (109 cycles): median loss -4.06%, avg loss -7.98%, 11% beyond -10%.
+
+- ✅ Added 30-minute minimum hold before indicator exits (BB, RSI, EMA) apply
+- ✅ Hard stop/timeout/target checks still active from the start
+- ✅ Changed hard stop from -5% to -10% (based on target's actual loss distribution)
+- ✅ Fixes 533/796 positions that were instant-closed at 0% P&L
 
 ### 2026-03-15 - Prediction v5: BTC Macro Regime Detection
 

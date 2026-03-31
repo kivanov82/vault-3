@@ -12,7 +12,7 @@ Vault-3 copies positions from a top-performing Hyperliquid vault while running a
 
 - **Copytrading**: Fully operational, +30% scaled position sizing
 - **Predictions**: v5 — indicator-based scoring with BTC macro regime detection
-- **Independent Trading**: v5 — indicator-based exits (BB, RSI, EMA signals)
+- **Independent Trading**: v5.1 — indicator-based exits with 30min min hold, -10% hard stop
 - **Infrastructure**: Google Cloud Run + Cloud SQL (PostgreSQL)
 
 ---
@@ -60,8 +60,8 @@ Runs before each copy cycle:
 Opens autonomous positions on high-confidence signals:
 
 - **Entry**: Score >= 90 (LONG) or >= 95 (SHORT), whitelist symbol, no existing position
-- **Exit**: Indicator-based (BB > 0.8, RSI > 70, price < EMAs, BB mean reversion)
-- **Safety**: -5% hard stop, 72h max hold, target confirmation/opposite handling
+- **Exit**: Indicator-based (BB > 0.8, RSI > 70, price < EMAs, BB mean reversion) with 30min min hold
+- **Safety**: -10% hard stop, 72h max hold, target confirmation/opposite handling
 - **Allocation**: 10% of vault, max 3 positions, 5x leverage
 
 ---
@@ -83,7 +83,7 @@ ENABLE_INDEPENDENT_TRADING=true
 INDEPENDENT_MAX_ALLOCATION_PCT=0.10
 INDEPENDENT_MAX_POSITIONS=3
 INDEPENDENT_LEVERAGE=5
-INDEPENDENT_HARD_STOP_PCT=0.05
+INDEPENDENT_HARD_STOP_PCT=0.10
 INDEPENDENT_MAX_HOLD_HOURS=72
 
 # Database

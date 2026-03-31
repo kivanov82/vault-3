@@ -22,7 +22,7 @@
  * - Price below EMA9 AND EMA21: profitable zone (+3.3% avg) → take profit
  *
  * Safety nets (always active):
- * - Hard stop: -5% from entry
+ * - Hard stop: -10% from entry (from target's loss distribution: median -4%, avg -8%)
  * - Max hold: 72h
  * - Target confirmation/opposite handling
  *
@@ -30,8 +30,14 @@
  * - Replaced trailing stop with indicator-based exits
  * - LONG: exit on BB > 0.8, RSI > 70, or price < both EMAs (after min hold)
  * - SHORT: exit on BB 0.4-0.6 (mean reversion), or price < both EMAs
- * - Removed min hold requirement for indicator exits (signals are reliable)
  * - Kept hard stop and max hold as safety nets
+ *
+ * v5.1 fix (2026-03-31):
+ * - Added 30-min minimum hold before indicator exits apply
+ * - Fixes race condition: BB breakout entry (bbPosition > 1.0 = +10 score)
+ *   was immediately triggering BB > 0.8 exit in the same cycle (0% P&L)
+ * - This caused 67% of positions (533/796) to open and instantly close
+ * - Hard stop and timeout still active from the start
  */
 
 import dotenv from 'dotenv';
@@ -54,7 +60,7 @@ const CONFIG = {
 
   // v5: Indicator-based exit strategy
   MAX_HOLD_HOURS: parseInt(process.env.INDEPENDENT_MAX_HOLD_HOURS || '72', 10),
-  HARD_STOP_PCT: parseFloat(process.env.INDEPENDENT_HARD_STOP_PCT || '0.05'),          // -5% from entry
+  HARD_STOP_PCT: parseFloat(process.env.INDEPENDENT_HARD_STOP_PCT || '0.10'),          // -10% from entry (target median loss -4%, avg -8%, 11% beyond -10%)
 
   // Indicator exit thresholds (from 109 cycle analysis)
   EXIT_BB_UPPER: 0.8,    // LONG: BB > 0.8 = 0% WR, -23% avg → exit
@@ -278,6 +284,15 @@ export class IndependentTrader {
         }
 
         // === 4. INDICATOR-BASED EXITS ===
+        // Skip indicator exits for positions opened less than 30 minutes ago.
+        // This prevents the race condition where a BB breakout entry signal
+        // (bbPosition > 1.0 = +10 score) immediately triggers the BB > 0.8
+        // exit check in the same or next cycle, causing instant close at 0% P&L.
+        const holdTimeMinutes = holdTimeMs / (60 * 1000);
+        if (holdTimeMinutes < 30) {
+          continue; // Too early for indicator exits, rely on hard stop / timeout / target checks
+        }
+
         const indicators = await this.getLatestIndicators(pos.symbol);
         if (!indicators) {
           continue; // No indicator data yet, rely on hard stop / timeout
