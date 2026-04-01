@@ -76,7 +76,7 @@ Signal Detection (score ≥ 90 LONG / ≥ 95 SHORT, whitelist symbol)
 | Min score (SHORT) | 95 | Higher bar for shorts |
 | Leverage | 5x | Matches target avg (4.8x rounded) |
 | Copy scale | +30% (1.3x) | COPY_SCALE_MULTIPLIER=1.3 |
-| Exit strategy | v5.1: indicator-based | BB, RSI, EMA signals (30min min hold) + hard stop + timeout |
+| Exit strategy | v5.1: indicator-based | BB, RSI, EMA signals (BB exit skipped on breakout entries) + hard stop + timeout |
 | Whitelist | HYPE, SOL, VVV, ETH, MON, FARTCOIN | From cycle analysis |
 
 ### Exit Strategy (v5 - Indicator-Based)
@@ -421,10 +421,10 @@ closed in the same cycle with 0% P&L due to contradictory entry/exit signals:
 Hard stop was also too tight: -5% price move = -25% margin loss at 5x leverage.
 Target trader data (109 cycles): median loss -4.06%, avg loss -7.98%, 11% beyond -10%.
 
-- ✅ Added 30-minute minimum hold before indicator exits (BB, RSI, EMA) apply
-- ✅ Hard stop/timeout/target checks still active from the start
+- ✅ Skip BB > 0.8 exit when position entered on bb_breakout_above signal
+- ✅ 57% of BB upper exits (308/540) were contradicting their own entry signal
 - ✅ Changed hard stop from -5% to -10% (based on target's actual loss distribution)
-- ✅ Fixes 533/796 positions that were instant-closed at 0% P&L
+- ✅ Breakout entries expect price above band — exiting there defeats the strategy
 
 ### 2026-03-15 - Prediction v5: BTC Macro Regime Detection
 

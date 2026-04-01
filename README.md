@@ -60,7 +60,7 @@ Runs before each copy cycle:
 Opens autonomous positions on high-confidence signals:
 
 - **Entry**: Score >= 90 (LONG) or >= 95 (SHORT), whitelist symbol, no existing position
-- **Exit**: Indicator-based (BB > 0.8, RSI > 70, price < EMAs, BB mean reversion) with 30min min hold
+- **Exit**: Indicator-based (BB > 0.8 unless breakout entry, RSI > 70, price < EMAs, BB mean reversion)
 - **Safety**: -10% hard stop, 72h max hold, target confirmation/opposite handling
 - **Allocation**: 10% of vault, max 3 positions, 5x leverage
 

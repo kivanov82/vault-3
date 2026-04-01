@@ -33,11 +33,10 @@
  * - Kept hard stop and max hold as safety nets
  *
  * v5.1 fix (2026-03-31):
- * - Added 30-min minimum hold before indicator exits apply
- * - Fixes race condition: BB breakout entry (bbPosition > 1.0 = +10 score)
- *   was immediately triggering BB > 0.8 exit in the same cycle (0% P&L)
- * - This caused 67% of positions (533/796) to open and instantly close
- * - Hard stop and timeout still active from the start
+ * - Hard stop changed from -5% to -10% (target median loss -4%, avg -8%)
+ * - Skip BB > 0.8 exit when position entered on bb_breakout_above signal
+ *   (57% of BB exits were contradicting their own entry signal)
+ * - Breakout entries expect price above band — that's the whole point
  */
 
 import dotenv from 'dotenv';
@@ -284,15 +283,6 @@ export class IndependentTrader {
         }
 
         // === 4. INDICATOR-BASED EXITS ===
-        // Skip indicator exits for positions opened less than 30 minutes ago.
-        // This prevents the race condition where a BB breakout entry signal
-        // (bbPosition > 1.0 = +10 score) immediately triggers the BB > 0.8
-        // exit check in the same or next cycle, causing instant close at 0% P&L.
-        const holdTimeMinutes = holdTimeMs / (60 * 1000);
-        if (holdTimeMinutes < 30) {
-          continue; // Too early for indicator exits, rely on hard stop / timeout / target checks
-        }
-
         const indicators = await this.getLatestIndicators(pos.symbol);
         if (!indicators) {
           continue; // No indicator data yet, rely on hard stop / timeout
@@ -304,7 +294,9 @@ export class IndependentTrader {
           // LONG exit signals (from 89 long cycle analysis):
 
           // BB > 0.8: 0% win rate, -23% avg → exit immediately
-          if (bbPosition !== null && bbPosition > CONFIG.EXIT_BB_UPPER) {
+          // BUT: skip if position was entered on BB breakout — price is expected to be above band
+          const enteredOnBbBreakout = (pos as any).predictionReasons?.includes('bb_breakout_above');
+          if (bbPosition !== null && bbPosition > CONFIG.EXIT_BB_UPPER && !enteredOnBbBreakout) {
             logger.info(`📊 ${pos.symbol}: BB position ${bbPosition.toFixed(2)} > ${CONFIG.EXIT_BB_UPPER} → exit long`);
             await this.closePosition(pos, currentPrice, 'indicator_bb_upper');
             continue;
