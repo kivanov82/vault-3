@@ -558,6 +558,36 @@ export class IndependentTrader {
   }
 
   /**
+   * Force close an independent position's DB record (exchange close handled by CopyTradingManager).
+   * Called when copy trading needs to take over the symbol (e.g., flip direction).
+   */
+  static async forceClosePosition(symbol: string, exitPrice: number, reason: string): Promise<void> {
+    const position = await prisma.independentPosition.findFirst({
+      where: { symbol, status: { in: ['open', 'confirmed'] } },
+    });
+    if (!position) return;
+
+    const priceDiff = exitPrice - position.entryPrice;
+    const realizedPnl = position.side === 'long' ? priceDiff * position.size : -priceDiff * position.size;
+    const realizedPnlPct = (priceDiff / position.entryPrice) * 100 * (position.side === 'long' ? 1 : -1);
+
+    await prisma.independentPosition.update({
+      where: { id: position.id },
+      data: {
+        status: 'closed',
+        exitPrice,
+        exitReason: reason,
+        closedAt: new Date(),
+        realizedPnl,
+        realizedPnlPct,
+      },
+    });
+
+    const pnlEmoji = realizedPnl >= 0 ? '💰' : '📉';
+    logger.info(`🔄 ${symbol}: INDEPENDENT FORCE CLOSE ${reason} @ $${exitPrice.toFixed(2)} ${pnlEmoji} P&L: $${realizedPnl.toFixed(2)} (${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%)`);
+  }
+
+  /**
    * Mark an independent position as confirmed by target
    * Called when copy trading detects target opened same position
    */

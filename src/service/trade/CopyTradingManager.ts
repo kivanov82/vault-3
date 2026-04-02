@@ -359,15 +359,16 @@ export class CopyTradingManager {
             positionDelta.action = 'open';
         } else if (targetSide !== 'none' && ourSide !== 'none' && targetSide !== ourSide) {
             // Target flipped direction, we need to flip
-            // BUT: Check if this is an unconfirmed independent position
+            // Copy trading ALWAYS takes priority over independent positions
             if (IndependentTrader.isEnabled()) {
                 const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
                 if (indepStatus.exists && !indepStatus.confirmed) {
-                    // Independent position with opposite target direction
-                    // IndependentTrader.managePositions already handles this (closes on target_opposite)
-                    // Skip flip to avoid race condition with stale position data
-                    logger.info(`⏸️  ${ticker}: Skipping flip - independent position being closed by IndependentTrader`);
-                    return;
+                    // Close the independent position record in DB before flipping
+                    const market = Number(allMarkets[ticker]);
+                    if (market && !isNaN(market)) {
+                        await IndependentTrader.forceClosePosition(ticker, market, 'copy_override');
+                        logger.info(`🔄 ${ticker}: Closed independent position - copy trading taking over (flip)`);
+                    }
                 }
             }
             positionDelta.needsAction = true;
@@ -452,8 +453,8 @@ export class CopyTradingManager {
                 }
             }
 
-            // Check if we have enough margin for open/flip actions
-            if (action === 'open' || action === 'flip') {
+            // Check if we have enough margin for open actions (skip for flip - closing frees margin first)
+            if (action === 'open') {
                 const ourPortfolio = await HyperliquidConnector.getPortfolio(WALLET);
                 const requiredMargin = positionValueUSD / targetLeverage;
                 const requiredMarginWithBuffer = requiredMargin * 1.2;
@@ -462,7 +463,7 @@ export class CopyTradingManager {
                     logger.warn(`⚠️  ${symbol}: Need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)}`);
                     return;
                 }
-            } else {
+            } else if (action !== 'close' && action !== 'flip') {
                 logger.info(`💰 ${symbol}: Position value $${positionValueUSD.toFixed(2)}, Leverage ${targetLeverage}x`);
             }
 
@@ -485,8 +486,22 @@ export class CopyTradingManager {
                     break;
 
                 case 'flip':
+                    // Step 1: Close existing position first (frees up margin)
                     await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', 1, market);
+                    logger.info(`✅ ${symbol}: FLIP step 1 - closed ${ourSide}`);
                     await new Promise(resolve => setTimeout(resolve, 2000));
+
+                    // Step 2: Check margin after close before opening new direction
+                    const flipPortfolio = await HyperliquidConnector.getPortfolio(WALLET);
+                    const flipMarginNeeded = (positionValueUSD / targetLeverage) * 1.2;
+                    if (flipMarginNeeded > flipPortfolio.available) {
+                        logger.warn(`⚠️  ${symbol}: FLIP step 2 - closed ${ourSide} but insufficient margin for ${targetSide} (need $${flipMarginNeeded.toFixed(2)}, have $${flipPortfolio.available.toFixed(2)})`);
+                        await this.logCopyTrade(symbol, 'close', ourSide, 0, market, targetLeverage, scanStartTime);
+                        tradedSymbols.add(symbol);
+                        break;
+                    }
+
+                    // Step 3: Open new position in target direction
                     await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
                     logger.info(`✅ ${symbol}: FLIP ${ourSide}→${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x`);
                     await this.logCopyTrade(symbol, 'flip', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);

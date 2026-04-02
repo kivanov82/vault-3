@@ -13,7 +13,7 @@
 
 - **Our Vault:** `0xc94376c6e3e85dfbe22026d9fe39b000bcf649f0` (vault-3)
 - **Vault Leader:** `0x3Fc6E2D6c0E1D4072F876f74E03d191e2cC61922`
-- **Target Vault:** `0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3`
+- **Copy Target (wallet):** `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` (trader's personal wallet, formerly vault `0x4cb5...`)
 - **Copy Strategy:** Position-based with scaled sizing
 - **Leverage:** Exact 1:1 match with target
 - **Scan Interval:** 5 minutes (configurable)
@@ -314,7 +314,7 @@ npm run docker-push
 
 ```bash
 # Copytrading
-COPY_TRADER=0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3
+COPY_TRADER=0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
 COPY_SCALE_MULTIPLIER=1.3            # 30% larger than proportional
