@@ -41,10 +41,20 @@
 import { prisma } from '../utils/db';
 import { logger } from '../utils/logger';
 
-// Strategy parameters based on deep target vault analysis (43K+ fills, hedging analysis)
+// Strategy parameters based on historical analysis (62 cycles, Jan 1 - Mar 10, 2026)
+//
+// Key findings from v6 analysis:
+// - Shorts outperform: 76% WR, +2.47% avg vs longs 45.9% WR, +1.71%
+// - Best combo: MACD+|RSI>70|BB>0.8|EMA+|BTC:bull|Mom+ → 86% WR, +8.73%
+// - Winners enter on dips (1h change -0.11%), losers chase (+0.56%)
+// - Stoch %K: winners at 56, losers at 77 — overbought entries lose
+// - US session best (69.6% WR, +4.31%), Asia worst (31.3%, -0.57%)
+// - Bear regime: 66.7% WR with short bias; Neutral regime: worst (-0.19% avg)
+// - Top symbols: kPEPE (+15.1%), VVV (+8.7%), HYPE (+2.8%), ETH (+1.75%)
+// - Avoid: IP (0% WR), PUMP (-0.45%)
 const STRATEGY = {
   // Symbols the target always longs during hedging (>90% long)
-  ALWAYS_LONG_SYMBOLS: ['ENA', 'IP', 'SKY', 'RESOLV', 'VIRTUAL', 'AERO', 'JUP', 'FARTCOIN', 'ZEC', 'AXS', 'BERA', 'XMR', 'AIXBT', 'AVNT'],
+  ALWAYS_LONG_SYMBOLS: ['ENA', 'SKY', 'RESOLV', 'VIRTUAL', 'AERO', 'JUP', 'FARTCOIN', 'ZEC', 'AXS', 'BERA', 'XMR', 'AIXBT', 'AVNT'],
 
   // Symbols the target switches direction on (these are the interesting ones)
   DIRECTIONAL_SYMBOLS: ['BTC', 'ETH', 'SOL', 'HYPE', 'VVV', 'kPEPE', 'SPX'],
@@ -58,7 +68,8 @@ const STRATEGY = {
   // Secondary symbols
   SECONDARY_SYMBOLS: ['PUMP', 'kPEPE', 'SPX', 'SKY'],
 
-  // Session definitions (UTC) - scored by entry WIN RATE from cycle analysis
+  // Session definitions (UTC) - scored by entry WIN RATE from 62-cycle analysis
+  // US: 69.6% WR +4.31%, Europe: 65.2% +1.53%, Asia: 31.3% -0.57%
   ASIA_HOURS: [0, 1, 2, 3, 4, 5, 6, 7],
   EUROPE_HOURS: [8, 9, 10, 11, 12, 13, 14, 15],
   US_HOURS: [16, 17, 18, 19, 20, 21, 22, 23],
@@ -228,21 +239,22 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
   }
 
   // === 5. MOMENTUM CONFIRMATION ===
+  // v6: Winners enter on dips (1h change -0.11%), losers chase (+0.56%)
+  // Positive 1h change reduces score — chasing momentum is a losing pattern
   if (state.priceChange1h !== null && state.priceChange1h !== undefined) {
-    if (state.priceChange1h > 0.5) {
-      score += 10;
-      reasons.push('momentum_up');
+    if (state.priceChange1h < -0.5) {
+      score += 8;
+      reasons.push('dip_entry');  // v6: winners enter on dips
       longSignals++;
-    } else if (state.priceChange1h < -0.5) {
-      score += 5;
-      reasons.push('momentum_down');
-      shortSignals++;
+    } else if (state.priceChange1h > 1.0) {
+      score -= 3;
+      reasons.push('chasing_momentum');  // v6: losers chase
     }
   }
 
   if (state.priceChange4h !== null && state.priceChange4h !== undefined) {
     if (state.priceChange4h > 1) {
-      score += 8;
+      score += 5;
       reasons.push('trend_up_4h');
       longSignals++;
     } else if (state.priceChange4h < -1) {
@@ -340,11 +352,10 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
     longSignals += 2;
     reasons.push('macro_bull_regime');
   } else {
-    // Neutral / transitional — slight bonus for any direction, BTC calm helps
-    if (state.btcIsCalm) {
-      score += 3;
-      reasons.push('btc_calm');
-    }
+    // v6: Neutral regime is the WORST for trading (-0.19% avg P&L)
+    // Reduce score to discourage entries during unclear macro conditions
+    score -= 5;
+    reasons.push('macro_neutral_regime');
   }
 
   // Short-term BTC momentum (in addition to macro regime)
@@ -359,19 +370,19 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
   }
 
   // === 8. SESSION AWARENESS ===
-  if (STRATEGY.EUROPE_HOURS.includes(hour)) {
-    score += 8;
-    reasons.push('europe_session');
-  } else if (STRATEGY.US_HOURS.includes(hour)) {
-    score += 5;
+  // v6: US 69.6% WR +4.31%, Europe 65.2% +1.53%, Asia 31.3% -0.57%
+  if (STRATEGY.US_HOURS.includes(hour)) {
+    score += 10;
     reasons.push('us_session');
+  } else if (STRATEGY.EUROPE_HOURS.includes(hour)) {
+    score += 6;
+    reasons.push('europe_session');
   } else if (STRATEGY.ASIA_HOURS.includes(hour)) {
-    score += 3;
+    score -= 3;
     reasons.push('asia_session');
   }
 
   // === 9. SYMBOL ROLE AWARENESS ===
-  // Based on hedging analysis: some symbols are almost always long or short
   if (STRATEGY.ALWAYS_LONG_SYMBOLS.includes(symbol)) {
     score += 5;
     reasons.push('always_long_symbol');
@@ -605,7 +616,7 @@ export class PredictionLogger {
             reasons,
             entryPrice: price,
             features: marketState as any,
-            modelVersion: 'momentum-v3',
+            modelVersion: 'momentum-v6',
           },
         });
 
@@ -700,7 +711,7 @@ export class PredictionLogger {
         validatedAt: null,
         timestamp: { lt: cutoff },
         entryPrice: { not: null },
-        modelVersion: 'momentum-v3',
+        modelVersion: 'momentum-v6',
       },
       take: 100,
     });

@@ -53,8 +53,8 @@ const WALLET = process.env.WALLET as `0x${string}`;
 // Configuration (can be overridden via env vars)
 const CONFIG = {
   ENABLED: process.env.ENABLE_INDEPENDENT_TRADING === 'true',
-  MAX_ALLOCATION_PCT: parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.10'),
-  MAX_POSITIONS: parseInt(process.env.INDEPENDENT_MAX_POSITIONS || '3', 10),
+  MAX_ALLOCATION_PCT: parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.30'),
+  MAX_POSITIONS: parseInt(process.env.INDEPENDENT_MAX_POSITIONS || '5', 10),
   LEVERAGE: parseInt(process.env.INDEPENDENT_LEVERAGE || '5', 10),
 
   // v5: Indicator-based exit strategy
@@ -69,10 +69,9 @@ const CONFIG = {
 
   // Score thresholds
   MIN_SCORE_LONG: 90,
-  MIN_SCORE_SHORT: 95,  // Higher bar for shorts
+  MIN_SCORE_SHORT: 95,  // Higher bar for shorts (small sample in analysis)
 
   // Whitelist: proven performers from target vault cycle analysis
-  // HYPE: 69% WR, ETH: 82% WR, SOL: 86% WR, VVV: 75% WR, MON: 75% WR, FARTCOIN: 57% WR
   WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'MON', 'FARTCOIN'],
 };
 
