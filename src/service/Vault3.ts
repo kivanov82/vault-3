@@ -15,8 +15,12 @@ let heartbeatInterval: NodeJS.Timeout | null = null;
 export class Vault3 {
 
     static async init(): Promise<any> {
+        const copyTraders = (process.env.COPY_TRADERS || '').split(',').filter(s => s.trim());
         console.log('\n🚀 Vault-3 Initializing...');
-        console.log(`   Copy Trading: ${ENABLE_COPY_TRADING ? '✅ ENABLED' : '❌ DISABLED'}`);
+        console.log(`   Copy Trading: ${ENABLE_COPY_TRADING ? '✅ ENABLED' : '❌ DISABLED'} (${copyTraders.length} target${copyTraders.length !== 1 ? 's' : ''})`);
+        for (const t of copyTraders) {
+            console.log(`     → ${t.trim()}`);
+        }
         console.log(`   Independent Trading: ${IndependentTrader.isEnabled() ? '✅ ENABLED' : '❌ DISABLED'} (env: ${process.env.ENABLE_INDEPENDENT_TRADING})`);
 
         // Heartbeat to ensure process is alive and monitor resources

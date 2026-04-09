@@ -1,20 +1,24 @@
 # Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
 
 **Project Status:** Phase 5 - Optimization & Scaling
-**Last Updated:** 2026-03-15
+**Last Updated:** 2026-04-04
 
 ---
 
 ## Current State
 
-✅ **Fully operational copytrading bot** with integrated prediction system and autonomous trading capability.
+✅ **Multi-target copytrading bot** with integrated prediction system and autonomous trading capability.
 
 ### Configuration
 
 - **Our Vault:** `0xc94376c6e3e85dfbe22026d9fe39b000bcf649f0` (vault-3)
 - **Vault Leader:** `0x3Fc6E2D6c0E1D4072F876f74E03d191e2cC61922`
-- **Copy Target (wallet):** `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` (trader's personal wallet, formerly vault `0x4cb5...`)
-- **Copy Strategy:** Position-based with scaled sizing
+- **Copy Targets (multi-target):**
+  - `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` — Bitcoin MA Long/Short (BTC-only, MA strategy, 20x)
+  - `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` — Archangel Quant Fund I (BTC+SOL macro, 20x)
+- **Portfolio Split:** 30% copy target 1 / 30% copy target 2 / 30% independent / 10% buffer
+- **Copy Scale Multiplier:** 3.0 (aggressive — targets use ~4-6% margin, we target ~12-18%)
+- **Copy Strategy:** Position-based with scaled sizing, aggregated across targets
 - **Leverage:** Exact 1:1 match with target
 - **Scan Interval:** 5 minutes (configurable)
 - **Slippage:** 1% for market orders
@@ -182,30 +186,34 @@ npm run ml:deep        # Deep behavioral analysis
 
 ## Technical Implementation
 
-### Position-Based Copytrading
+### Multi-Target Position-Based Copytrading
 
 **Core Logic** (every 5 minutes):
 
 1. Check database connection health (auto-reconnect if needed)
-2. Fetch all positions from target vault and our vault
-3. Calculate scale factor: `ourVaultSize / targetVaultSize`
-4. **Run predictions for all symbols** (shadow mode)
-5. **Process independent trading signals** (if enabled)
-6. **Manage independent positions** (TP/SL/timeout checks)
-7. For each symbol:
-   - Compare target position vs. our position
-   - Check for independent position conflicts
+2. Fetch our portfolio and all market prices
+3. Fetch each copy target's portfolio and positions **sequentially** (avoids HL RPC rate limits)
+4. **Aggregate** desired positions across all targets:
+   - Sum scaled sizes for same symbol/direction across targets
+   - If targets disagree on direction, larger notional side wins
+   - Scale factor per target: `(ourPortfolio / numTargets / targetPortfolio) * COPY_SCALE_MULTIPLIER`
+5. **Run predictions for all symbols** (shadow mode)
+6. **Process independent trading signals** (if enabled, copy always takes precedence)
+7. **Manage independent positions** (indicator-based exits)
+8. For each aggregated symbol (one pass, no duplicates):
+   - Compare aggregated desired position vs. our position
+   - Copy overrides independent: force-close independent on conflict
    - Determine action: OPEN, CLOSE, FLIP, or ADJUST
    - Apply risk checks (min margin $5, min position $10)
    - Execute trade with exact leverage matching (1% slippage)
    - **Log prediction outcome** (what action was actually taken)
-8. Finalize predictions for symbols with no action
-9. Periodically validate past predictions (paper P&L)
+9. Finalize predictions for symbols with no action
+10. Periodically validate past predictions (paper P&L)
 
 **Position Actions:**
-- **OPEN**: Target has position, we don't → Open new position
-- **CLOSE**: Target closed, we still have position → Close position (unless unconfirmed independent)
-- **FLIP**: Target changed direction (long↔short) → Close + Open opposite
+- **OPEN**: Target(s) have position, we don't → Open new position (override independent if needed)
+- **CLOSE**: No target holds symbol, we still have position → Close (unless unconfirmed independent)
+- **FLIP**: Aggregated target wants opposite direction → Close + Open opposite (override independent)
 - **ADJUST**: Same direction but size differs >10% → Increase or decrease
 
 ---
@@ -313,11 +321,11 @@ npm run docker-push
 ## Environment Configuration
 
 ```bash
-# Copytrading
-COPY_TRADER=0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8
+# Copytrading (multi-target: comma-separated addresses)
+COPY_TRADERS=0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768,0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
-COPY_SCALE_MULTIPLIER=1.3            # 30% larger than proportional
+COPY_SCALE_MULTIPLIER=3.0            # 3x larger than proportional (targets use ~4-6% margin)
 
 # Phase Control
 ENABLE_COPY_TRADING=true

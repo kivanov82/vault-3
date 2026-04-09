@@ -50,6 +50,22 @@ export class HyperliquidConnector {
     }
 
     /**
+     * Extract the actual fill price from an order response.
+     * Returns avgPx if the order was filled, null otherwise.
+     */
+    static getFillPrice(orderResult: any): number | null {
+        try {
+            const statuses = orderResult?.response?.data?.statuses;
+            if (!statuses || !Array.isArray(statuses) || statuses.length === 0) return null;
+            const status = statuses[0];
+            if (status?.filled?.avgPx) {
+                return parseFloat(status.filled.avgPx);
+            }
+        } catch {}
+        return null;
+    }
+
+    /**
      * Open a copy position with specified size and leverage (no TP/SL)
      * Used for copytrading where we match target vault's positions exactly
      * @param allowAddToExisting - If true, allows adding to existing position (for rebalancing)

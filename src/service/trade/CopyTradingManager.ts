@@ -10,8 +10,14 @@ import { MarketDataCollector } from '../data/MarketDataCollector';
 dotenv.config(); // Load environment variables
 
 const WALLET = process.env.WALLET as `0x${string}`;
-const COPY_TRADER = process.env.COPY_TRADER as `0x${string}`;
 const COPY_MODE = process.env.COPY_MODE || 'scaled';
+
+// Multi-target copy trading: comma-separated vault/wallet addresses
+// e.g. "0xabc...,0xdef..."
+const COPY_TRADERS: `0x${string}`[] = (process.env.COPY_TRADERS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0) as `0x${string}`[];
 
 // Minimal risk limit
 const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5');
@@ -19,8 +25,8 @@ const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5
 // Position adjustment threshold (e.g., 0.1 = 10% difference triggers rebalance)
 const POSITION_ADJUST_THRESHOLD = parseFloat(process.env.POSITION_ADJUST_THRESHOLD || '0.1');
 
-// Scale multiplier for copy positions (1.3 = 30% larger than proportional)
-const COPY_SCALE_MULTIPLIER = parseFloat(process.env.COPY_SCALE_MULTIPLIER || '1.3');
+// Scale multiplier for copy positions (3.0 = 3x larger than proportional)
+const COPY_SCALE_MULTIPLIER = parseFloat(process.env.COPY_SCALE_MULTIPLIER || '3.0');
 
 // Track last scan time for latency calculation
 const tradeStartTimes = new Map<string, number>();
@@ -134,7 +140,7 @@ export class CopyTradingManager {
     }
 
     /**
-     * Internal scan implementation
+     * Internal scan implementation — iterates through all copy targets
      */
     private static async _doScan(scanStartTime: number) {
         // Clean up expired failed order cooldowns
@@ -177,40 +183,62 @@ export class CopyTradingManager {
             // Fetch asset metadata on first scan
             await this.fetchAssetMetadata();
 
-            // Get both vault portfolios and all market prices in a single batch
-            // This avoids calling getMarket() for each symbol (which was causing timeouts)
-            const [targetPortfolio, ourPortfolio, targetPositions, allMarkets] = await Promise.all([
-                HyperliquidConnector.getPortfolio(COPY_TRADER),
+            // Fetch our portfolio and all market prices once (shared across all targets)
+            const [ourPortfolio, allMarkets] = await Promise.all([
                 HyperliquidConnector.getPortfolio(WALLET),
-                HyperliquidConnector.getOpenPositions(COPY_TRADER),
-                HyperliquidConnector.getMarkets(), // Fetch ALL markets once
+                HyperliquidConnector.getMarkets(),
             ]);
 
-            // Calculate scaling factor based on vault sizes (with multiplier)
-            const scaleFactor = COPY_MODE === 'exact' ? 1.0 :
-                                (ourPortfolio.portfolio / targetPortfolio.portfolio) * COPY_SCALE_MULTIPLIER;
+            // Fetch targets sequentially to avoid HL RPC rate limits
+            const activeTargets: {
+                trader: `0x${string}`;
+                portfolio: { portfolio: number; available: number };
+                positions: any;
+            }[] = [];
+            for (const trader of COPY_TRADERS) {
+                try {
+                    const [portfolio, positions] = await Promise.all([
+                        HyperliquidConnector.getPortfolio(trader),
+                        HyperliquidConnector.getOpenPositions(trader),
+                    ]);
+                    activeTargets.push({ trader, portfolio, positions });
+                } catch (e: any) {
+                    logger.error(`❌ Failed to fetch target ${trader.slice(0, 10)}...: ${e.message}`);
+                }
+            }
 
-            // Get all symbols that target trader has positions in
-            const targetSymbols = targetPositions.assetPositions
-                .filter(ap => ap.position.szi !== '0')
-                .map(ap => ap.position.coin);
+            if (activeTargets.length === 0 && COPY_TRADERS.length > 0) {
+                logger.error(`❌ All copy targets unreachable, skipping copy trading`);
+            }
 
-            // Also check our positions to close any that target doesn't have
+            // Aggregate desired positions across ALL targets
+            // For each symbol: sum scaled sizes from all targets that hold it
+            // If targets disagree on direction, the side with larger total notional wins
+            const aggregatedPositions = this.aggregateTargetPositions(activeTargets, ourPortfolio.portfolio, allMarkets);
+
+            // Build combined target positions for IndependentTrader conflict detection
+            const combinedTargetPositions = this.mergeTargetPositions(activeTargets);
+
+            // Collect all symbols: target positions + our positions + independent whitelist
             const ourPositions = await HyperliquidConnector.getOpenPositions(WALLET);
             const ourSymbols = ourPositions.assetPositions
                 .filter(ap => ap.position.szi !== '0')
                 .map(ap => ap.position.coin);
 
-            // Get unique set of all symbols to check
-            // Include independent trading whitelist so we can detect signals on fresh symbols
             const independentWhitelist = IndependentTrader.isEnabled()
                 ? IndependentTrader.getConfig().WHITELIST
                 : [];
-            const allSymbols = [...new Set([...targetSymbols, ...ourSymbols, ...independentWhitelist])];
+            const allSymbols = [...new Set([
+                ...aggregatedPositions.keys(),
+                ...ourSymbols,
+                ...independentWhitelist,
+            ])];
 
             // Log scan summary
-            const scanSummary = `📊 Scan: ${allSymbols.length} symbols (${targetSymbols.length} target, ${ourSymbols.length} ours) | Scale: ${(scaleFactor * 100).toFixed(1)}% | Available: $${ourPortfolio.available.toFixed(2)}`;
-            logger.info(scanSummary);
+            const targetInfo = activeTargets.map(t =>
+                `${t.trader.slice(0, 8)}($${(t.portfolio.portfolio / 1000).toFixed(0)}K)`
+            ).join(', ');
+            logger.info(`📊 Scan: ${allSymbols.length} symbols | Targets: ${targetInfo} | Our: $${ourPortfolio.portfolio.toFixed(0)} avail $${ourPortfolio.available.toFixed(2)}`);
 
             // Collect fresh market data (candles + indicators) BEFORE predictions
             try {
@@ -227,19 +255,18 @@ export class CopyTradingManager {
             }
 
             // Independent trading: process signals and manage positions
+            // Pass combined target positions so conflicts with ANY target are detected
+            // Copy trading always takes precedence — IndependentTrader checks for conflicts
             if (IndependentTrader.isEnabled()) {
                 try {
-                    // Process new signals for entry opportunities
-                    await IndependentTrader.processSignals(allMarkets, targetPositions);
-                    // Manage existing positions (TP/SL/timeout)
-                    await IndependentTrader.managePositions(allMarkets, targetPositions);
+                    await IndependentTrader.processSignals(allMarkets, combinedTargetPositions);
+                    await IndependentTrader.managePositions(allMarkets, combinedTargetPositions);
                 } catch (indepError: any) {
                     logger.error(`Independent trading error: ${indepError.message}`);
                 }
             }
 
             // Re-fetch our positions after independent trading to avoid stale data
-            // (IndependentTrader may have opened/closed positions above)
             const freshOurPositions = IndependentTrader.isEnabled()
                 ? await HyperliquidConnector.getOpenPositions(WALLET)
                 : ourPositions;
@@ -247,16 +274,16 @@ export class CopyTradingManager {
             // Track which symbols had copy actions
             const tradedSymbols = new Set<string>();
 
-            // Process symbols in batches to avoid overwhelming the API
-            // Batch size of 5 prevents connection timeouts
+            // Sync positions using aggregated targets (one pass per symbol)
+            const symbolsToSync = [...new Set([...aggregatedPositions.keys(), ...ourSymbols])];
             const BATCH_SIZE = 5;
-            for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
-                const batch = allSymbols.slice(i, i + BATCH_SIZE);
+            for (let i = 0; i < symbolsToSync.length; i += BATCH_SIZE) {
+                const batch = symbolsToSync.slice(i, i + BATCH_SIZE);
                 const batchPromises = batch.map(symbol =>
                     Promise.race([
-                        this.syncPosition(symbol, scaleFactor, scanStartTime, targetPositions, freshOurPositions, allMarkets, tradedSymbols),
+                        this.syncPosition(symbol, 1.0, scanStartTime, aggregatedPositions, freshOurPositions, allMarkets, tradedSymbols),
                         new Promise((_, reject) =>
-                            setTimeout(() => reject(new Error('Sync timeout')), 30000) // 30 second timeout per symbol
+                            setTimeout(() => reject(new Error('Sync timeout')), 30000)
                         )
                     ]).catch((e: any) => {
                         logger.error(`❌ ${symbol}: ${e.message}`);
@@ -293,28 +320,127 @@ export class CopyTradingManager {
     }
 
     /**
-     * Sync a single position with the target vault
+     * Merge all targets' positions into a single assetPositions structure
+     * for IndependentTrader conflict detection. If multiple targets hold the
+     * same symbol, keeps the first one found.
+     */
+    private static mergeTargetPositions(targets: { positions: any }[]): any {
+        const seen = new Set<string>();
+        const merged: any[] = [];
+        for (const t of targets) {
+            for (const ap of t.positions.assetPositions) {
+                const coin = ap.position.coin;
+                if (ap.position.szi !== '0' && !seen.has(coin)) {
+                    seen.add(coin);
+                    merged.push(ap);
+                }
+            }
+        }
+        return { assetPositions: merged };
+    }
+
+    /**
+     * Aggregate desired positions across all copy targets into a single map.
+     * For each symbol, sums scaled sizes from all targets. If targets disagree
+     * on direction, the side with larger total notional wins.
+     *
+     * Returns a Map<symbol, { side, size, leverage }> representing what our
+     * combined position should be. The scaleFactor is pre-baked into size,
+     * so syncPosition uses scaleFactor=1.0.
+     *
+     * Also wraps results in an assetPositions-compatible format so syncPosition
+     * can consume it without changes.
+     */
+    private static aggregateTargetPositions(
+        targets: { trader: `0x${string}`; portfolio: { portfolio: number; available: number }; positions: any }[],
+        ourPortfolioValue: number,
+        allMarkets: Record<string, string>
+    ): Map<string, { side: string; size: number; leverage: number }> {
+        // Per-symbol: accumulate margin percentages (conviction) separately per side,
+        // then net by margin %. This ensures targets with different leverage but same
+        // margin allocation cancel out correctly.
+        const symbolData = new Map<string, {
+            longMarginPct: number; shortMarginPct: number;
+            longLeverage: number; shortLeverage: number;
+        }>();
+
+        for (const target of targets) {
+            for (const ap of target.positions.assetPositions) {
+                const coin = ap.position.coin;
+                const szi = Number(ap.position.szi);
+                if (szi === 0) continue;
+
+                const side = HyperliquidConnector.positionSide(ap.position);
+                const leverage = ap.position.leverage?.value || 1;
+                const price = Number(allMarkets[coin]);
+                if (!price) continue;
+
+                // Margin % = how much of the target's portfolio is allocated as margin
+                const notional = Math.abs(szi) * price;
+                const marginPct = notional / leverage / target.portfolio.portfolio;
+
+                const existing = symbolData.get(coin) || { longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0 };
+                if (side === 'long') {
+                    existing.longMarginPct += marginPct;
+                    existing.longLeverage = Math.max(existing.longLeverage, leverage);
+                } else {
+                    existing.shortMarginPct += marginPct;
+                    existing.shortLeverage = Math.max(existing.shortLeverage, leverage);
+                }
+                symbolData.set(coin, existing);
+            }
+        }
+
+        // Resolve direction: net margin percentages, then convert to position size
+        // Net margin % → our margin $ → notional $ → asset size
+        // Use the winning side's leverage for execution
+        const result = new Map<string, { side: string; size: number; leverage: number }>();
+        for (const [symbol, data] of symbolData) {
+            const netMarginPct = data.longMarginPct - data.shortMarginPct;
+            if (netMarginPct === 0) continue;
+
+            const side = netMarginPct > 0 ? 'long' : 'short';
+            const leverage = side === 'long' ? data.longLeverage : data.shortLeverage;
+            const price = Number(allMarkets[symbol]);
+            if (!price || !leverage) continue;
+
+            // Scale net margin % to our portfolio: margin $ per target avg, then scale up
+            const ourMargin = Math.abs(netMarginPct) * (ourPortfolioValue / targets.length) * COPY_SCALE_MULTIPLIER;
+            const notional = ourMargin * leverage;
+            const size = notional / price;
+
+            result.set(symbol, { side, size, leverage });
+        }
+
+        return result;
+    }
+
+    /**
+     * Sync a single position with the aggregated target state.
+     *
+     * @param aggregatedPositions Pre-computed map of desired positions (size already scaled).
+     *   scaleFactor param is unused (pass 1.0) since sizing is pre-baked.
      */
     private static async syncPosition(
         ticker: string,
-        scaleFactor: number,
+        _scaleFactor: number,
         scanStartTime: number,
-        targetPositions: any,
+        aggregatedPositions: Map<string, { side: string; size: number; leverage: number }>,
         ourPositions: any,
         allMarkets: Record<string, string>,
-        tradedSymbols: Set<string>
+        tradedSymbols: Set<string>,
     ) {
-        // Extract positions from already-fetched data (no additional API calls)
-        const targetPosition = targetPositions.assetPositions
-            .find((ap: any) => ap.position.coin === ticker)?.position;
+        // Look up aggregated desired position for this symbol
+        const desired = aggregatedPositions.get(ticker);
+        const targetSide = desired ? desired.side : 'none';
+        const targetSizeForUs = desired ? desired.size : 0;
+        const targetLeverage = desired ? desired.leverage : 1;
+
+        // Our current position
         const ourPosition = ourPositions.assetPositions
             .find((ap: any) => ap.position.coin === ticker)?.position;
-
-        const targetSide = targetPosition ? HyperliquidConnector.positionSide(targetPosition) : 'none';
         const ourSide = ourPosition ? HyperliquidConnector.positionSide(ourPosition) : 'none';
-        const targetSize = targetPosition ? Math.abs(Number(targetPosition.szi)) : 0;
         const ourSize = ourPosition ? Math.abs(Number(ourPosition.szi)) : 0;
-        const targetLeverage = targetPosition?.leverage?.value || 1;
 
         // Get ticker config (static or dynamic)
         const tickerConfig = this.getTickerConfig(ticker, targetLeverage);
@@ -323,15 +449,12 @@ export class CopyTradingManager {
             return;
         }
 
-        // Calculate target size for us (scaled)
-        const targetSizeForUs = targetSize * scaleFactor;
-
         // Calculate position delta
         const positionDelta = {
             symbol: ticker,
             targetSide,
             ourSide,
-            targetSize,
+            targetSize: targetSizeForUs, // already scaled
             ourSize,
             targetSizeForUs,
             targetLeverage,
@@ -341,29 +464,37 @@ export class CopyTradingManager {
 
         // Determine required action
         if (targetSide === 'none' && ourSide !== 'none') {
-            // Target closed, we need to close
-            // BUT: Check if this is an unconfirmed independent position
+            // No target holds this symbol — close (unless independent owns it)
             if (IndependentTrader.isEnabled()) {
                 const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
                 if (indepStatus.exists && !indepStatus.confirmed) {
-                    // Don't close unconfirmed independent positions via copy trading
-                    // They have their own TP/SL/timeout management
+                    // Unconfirmed independent position — let its own TP/SL/timeout manage
                     return;
                 }
             }
             positionDelta.needsAction = true;
             positionDelta.action = 'close';
         } else if (targetSide !== 'none' && ourSide === 'none') {
-            // Target opened, we need to open
+            // Target(s) want a position, we don't have one — open
+            // Copy trading takes precedence: force-close any independent position in opposite direction
+            if (IndependentTrader.isEnabled()) {
+                const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
+                if (indepStatus.exists && !indepStatus.confirmed) {
+                    const market = Number(allMarkets[ticker]);
+                    if (market && !isNaN(market)) {
+                        await IndependentTrader.forceClosePosition(ticker, market, 'copy_override');
+                        logger.info(`🔄 ${ticker}: Closed independent position - copy trading taking over (open)`);
+                    }
+                }
+            }
             positionDelta.needsAction = true;
             positionDelta.action = 'open';
         } else if (targetSide !== 'none' && ourSide !== 'none' && targetSide !== ourSide) {
-            // Target flipped direction, we need to flip
+            // Target wants opposite direction — flip
             // Copy trading ALWAYS takes priority over independent positions
             if (IndependentTrader.isEnabled()) {
                 const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
                 if (indepStatus.exists && !indepStatus.confirmed) {
-                    // Close the independent position record in DB before flipping
                     const market = Number(allMarkets[ticker]);
                     if (market && !isNaN(market)) {
                         await IndependentTrader.forceClosePosition(ticker, market, 'copy_override');
@@ -374,13 +505,12 @@ export class CopyTradingManager {
             positionDelta.needsAction = true;
             positionDelta.action = 'flip';
         } else if (targetSide !== 'none' && ourSide !== 'none' && targetSide === ourSide) {
-            // Same direction - check if this confirms an independent position
+            // Same direction — check if this confirms an independent position
             if (IndependentTrader.isEnabled()) {
                 const indepStatus = await IndependentTrader.hasIndependentPosition(ticker);
                 if (indepStatus.exists && !indepStatus.confirmed) {
-                    // Mark as confirmed - copy trading will now manage sizing
                     await IndependentTrader.confirmPosition(ticker);
-                    logger.info(`✅ ${ticker}: Independent position confirmed by target`);
+                    logger.info(`✅ ${ticker}: Independent position confirmed by copy target`);
                 }
             }
 
@@ -392,7 +522,6 @@ export class CopyTradingManager {
                 positionDelta.needsAction = true;
                 positionDelta.action = 'adjust';
             }
-            // else: Positions match within threshold - do nothing, stay synced with target
         }
 
         // Execute action if needed
@@ -469,26 +598,31 @@ export class CopyTradingManager {
 
             // Execute the action (pass market price to avoid additional API calls)
             switch (action) {
-                case 'close':
-                    await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', 1, market);
-                    logger.info(`✅ ${symbol}: CLOSE ${ourSide} ${ourSize.toFixed(4)}`);
-                    await this.logCopyTrade(symbol, 'close', ourSide, 0, market, targetLeverage, scanStartTime);
+                case 'close': {
+                    const closeResult = await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', 1, market);
+                    const closeFillPrice = HyperliquidConnector.getFillPrice(closeResult) ?? market;
+                    logger.info(`✅ ${symbol}: CLOSE ${ourSide} ${ourSize.toFixed(4)} @ $${closeFillPrice.toFixed(2)}`);
+                    await this.logCopyTrade(symbol, 'close', ourSide, 0, closeFillPrice, targetLeverage, scanStartTime);
                     tradedSymbols.add(symbol);
                     await PredictionLogger.logCopyAction(symbol, 'close', ourSide, ourSize);
                     break;
+                }
 
-                case 'open':
-                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
-                    logger.info(`✅ ${symbol}: OPEN ${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x`);
-                    await this.logCopyTrade(symbol, 'open', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
+                case 'open': {
+                    const openResult = await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
+                    const openFillPrice = HyperliquidConnector.getFillPrice(openResult) ?? market;
+                    logger.info(`✅ ${symbol}: OPEN ${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x fill $${openFillPrice.toFixed(2)}`);
+                    await this.logCopyTrade(symbol, 'open', targetSide, targetSizeForUs, openFillPrice, targetLeverage, scanStartTime);
                     tradedSymbols.add(symbol);
                     await PredictionLogger.logCopyAction(symbol, 'open', targetSide, targetSizeForUs);
                     break;
+                }
 
-                case 'flip':
+                case 'flip': {
                     // Step 1: Close existing position first (frees up margin)
-                    await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', 1, market);
-                    logger.info(`✅ ${symbol}: FLIP step 1 - closed ${ourSide}`);
+                    const flipCloseResult = await HyperliquidConnector.marketClosePosition(tickerConfig, ourSide === 'long', 1, market);
+                    const flipCloseFillPrice = HyperliquidConnector.getFillPrice(flipCloseResult) ?? market;
+                    logger.info(`✅ ${symbol}: FLIP step 1 - closed ${ourSide} @ $${flipCloseFillPrice.toFixed(2)}`);
                     await new Promise(resolve => setTimeout(resolve, 2000));
 
                     // Step 2: Check margin after close before opening new direction
@@ -496,18 +630,20 @@ export class CopyTradingManager {
                     const flipMarginNeeded = (positionValueUSD / targetLeverage) * 1.2;
                     if (flipMarginNeeded > flipPortfolio.available) {
                         logger.warn(`⚠️  ${symbol}: FLIP step 2 - closed ${ourSide} but insufficient margin for ${targetSide} (need $${flipMarginNeeded.toFixed(2)}, have $${flipPortfolio.available.toFixed(2)})`);
-                        await this.logCopyTrade(symbol, 'close', ourSide, 0, market, targetLeverage, scanStartTime);
+                        await this.logCopyTrade(symbol, 'close', ourSide, 0, flipCloseFillPrice, targetLeverage, scanStartTime);
                         tradedSymbols.add(symbol);
                         break;
                     }
 
                     // Step 3: Open new position in target direction
-                    await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
-                    logger.info(`✅ ${symbol}: FLIP ${ourSide}→${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x`);
-                    await this.logCopyTrade(symbol, 'flip', targetSide, targetSizeForUs, market, targetLeverage, scanStartTime);
+                    const flipOpenResult = await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
+                    const flipOpenFillPrice = HyperliquidConnector.getFillPrice(flipOpenResult) ?? market;
+                    logger.info(`✅ ${symbol}: FLIP ${ourSide}→${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x fill $${flipOpenFillPrice.toFixed(2)}`);
+                    await this.logCopyTrade(symbol, 'flip', targetSide, targetSizeForUs, flipOpenFillPrice, targetLeverage, scanStartTime);
                     tradedSymbols.add(symbol);
                     await PredictionLogger.logCopyAction(symbol, 'flip', targetSide, targetSizeForUs);
                     break;
+                }
 
                 case 'adjust':
                     // Adjust position size to match target allocation
@@ -600,7 +736,7 @@ export class CopyTradingManager {
     }
 
     /**
-     * Find the most recent open trade for a symbol and update it with exit price and P&L
+     * Find ALL open trade records for a symbol and update them with exit price and P&L
      */
     private static async updateOpenTradeWithPnl(
         symbol: string,
@@ -608,8 +744,7 @@ export class CopyTradingManager {
         exitPrice: number
     ) {
         try {
-            // Find the most recent open trade for this symbol that hasn't been closed yet
-            const openTrade = await prisma.trade.findFirst({
+            const openTrades = await prisma.trade.findMany({
                 where: {
                     trader: 'us',
                     symbol,
@@ -620,31 +755,31 @@ export class CopyTradingManager {
                 orderBy: { timestamp: 'desc' },
             });
 
-            if (!openTrade) return;
+            if (openTrades.length === 0) return;
 
-            const entryPrice = openTrade.entryPrice;
-            const tradeSize = openTrade.size;
-            const tradeLeverage = openTrade.leverage || 1;
+            let totalPnl = 0;
+            for (const openTrade of openTrades) {
+                const priceDiff = exitPrice - openTrade.entryPrice;
+                const pnl = closedSide === 'long'
+                    ? priceDiff * openTrade.size
+                    : -priceDiff * openTrade.size;
+                const pnlPercent = (priceDiff / openTrade.entryPrice) * 100 * (closedSide === 'long' ? 1 : -1);
+                const holdTimeSeconds = Math.round((Date.now() - openTrade.timestamp.getTime()) / 1000);
 
-            // P&L calculation: (exit - entry) * size for longs, (entry - exit) * size for shorts
-            const priceDiff = exitPrice - entryPrice;
-            const pnl = closedSide === 'long'
-                ? priceDiff * tradeSize
-                : -priceDiff * tradeSize;
-            const pnlPercent = (priceDiff / entryPrice) * 100 * (closedSide === 'long' ? 1 : -1);
-            const holdTimeSeconds = Math.round((Date.now() - openTrade.timestamp.getTime()) / 1000);
+                await prisma.trade.update({
+                    where: { id: openTrade.id },
+                    data: {
+                        exitPrice,
+                        pnl,
+                        pnlPercent,
+                        holdTimeSeconds,
+                    },
+                });
 
-            await prisma.trade.update({
-                where: { id: openTrade.id },
-                data: {
-                    exitPrice,
-                    pnl,
-                    pnlPercent: pnlPercent,
-                    holdTimeSeconds,
-                },
-            });
+                totalPnl += pnl;
+            }
 
-            logger.info(`📊 ${symbol}: P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%) held ${Math.round(holdTimeSeconds / 60)}m`);
+            logger.info(`📊 ${symbol}: closed ${openTrades.length} trade records, total P&L ${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`);
         } catch (error: any) {
             logger.error(`Failed to update P&L for ${symbol}: ${error.message}`);
         }

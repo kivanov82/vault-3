@@ -18,6 +18,7 @@
     "ml:save-report": "ts-node scripts/ml/save-strategy-report.ts",
     "ml:cleanup": "ts-node scripts/ml/cleanup-predictions.ts",
     "ml:independent-stats": "ts-node scripts/ml/independent-stats.ts",
+    "ml:reconcile": "ts-node scripts/ml/reconcile-pnl.ts",
     "ml:analysis": "ts-node scripts/ml/trading-analysis.ts",
     "ml:target-analysis": "ts-node scripts/ml/target-deep-analysis.ts",
     "ml:historical": "ts-node scripts/ml/historical-trade-analysis.ts",

@@ -192,6 +192,18 @@ export class IndependentTrader {
           break;
         }
 
+        // Pre-check: don't open if any indicator exit would fire immediately
+        const indicators = await this.getLatestIndicators(pred.symbol);
+        if (indicators) {
+          const dir = pred.direction === 1 ? 'long' : 'short';
+          const price = Number(allMarkets[pred.symbol]);
+          const exitSignal = this.checkIndicatorExit(dir, price, indicators);
+          if (exitSignal) {
+            logger.info(`⏭️  ${pred.symbol}: Skipping ${dir.toUpperCase()} — exit "${exitSignal}" already active`);
+            continue;
+          }
+        }
+
         // Open the position
         await this.openPosition(pred, positionSizeUsd, allMarkets);
 
@@ -282,55 +294,30 @@ export class IndependentTrader {
         }
 
         // === 4. INDICATOR-BASED EXITS ===
+        // Skip indicator exits in the first 10 minutes as a safety net
+        // (entry pre-check should already block contradictory entries, but this
+        // handles edge cases like indicators changing between entry and first manage cycle)
+        const MIN_HOLD_FOR_INDICATORS_MS = 10 * 60 * 1000; // 10 minutes
+        if (holdTimeMs < MIN_HOLD_FOR_INDICATORS_MS) {
+          continue;
+        }
+
         const indicators = await this.getLatestIndicators(pos.symbol);
         if (!indicators) {
           continue; // No indicator data yet, rely on hard stop / timeout
         }
 
-        const { rsi14, bbPosition, ema9, ema21 } = indicators;
+        // For existing positions: profit-taking exits (EMA TP, BB mean) require pnlFromEntry > 0
+        // BB breakout exception: skip BB > 0.8 exit if entered on breakout signal
+        const enteredOnBbBreakout = (pos as any).predictionReasons?.includes('bb_breakout_above');
+        const exitSignal = this.checkIndicatorExit(
+          pos.side, currentPrice, indicators, pnlFromEntry, enteredOnBbBreakout
+        );
 
-        if (pos.side === 'long') {
-          // LONG exit signals (from 89 long cycle analysis):
-
-          // BB > 0.8: 0% win rate, -23% avg → exit immediately
-          // BUT: skip if position was entered on BB breakout — price is expected to be above band
-          const enteredOnBbBreakout = (pos as any).predictionReasons?.includes('bb_breakout_above');
-          if (bbPosition !== null && bbPosition > CONFIG.EXIT_BB_UPPER && !enteredOnBbBreakout) {
-            logger.info(`📊 ${pos.symbol}: BB position ${bbPosition.toFixed(2)} > ${CONFIG.EXIT_BB_UPPER} → exit long`);
-            await this.closePosition(pos, currentPrice, 'indicator_bb_upper');
-            continue;
-          }
-
-          // RSI > 70: 30% win rate, -0.9% avg → exit
-          if (rsi14 !== null && rsi14 > CONFIG.EXIT_RSI_HIGH) {
-            logger.info(`📊 ${pos.symbol}: RSI ${rsi14.toFixed(1)} > ${CONFIG.EXIT_RSI_HIGH} → exit long`);
-            await this.closePosition(pos, currentPrice, 'indicator_rsi_high');
-            continue;
-          }
-
-          // Price below both EMAs: profitable zone (+11.4% avg) → take profit if in profit
-          if (ema9 !== null && ema21 !== null && currentPrice < ema9 && currentPrice < ema21 && pnlFromEntry > 0) {
-            logger.info(`📊 ${pos.symbol}: Price $${currentPrice.toFixed(2)} below EMA9 ($${ema9.toFixed(2)}) & EMA21 ($${ema21.toFixed(2)}), P&L +${(pnlFromEntry * 100).toFixed(2)}% → take profit`);
-            await this.closePosition(pos, currentPrice, 'indicator_ema_tp');
-            continue;
-          }
-
-        } else {
-          // SHORT exit signals (from 19 short cycle analysis):
-
-          // BB 0.4-0.6 (mean): 83% win rate, +4.2% avg → take profit at mean
-          if (bbPosition !== null && bbPosition >= CONFIG.EXIT_BB_MEAN_LOW && bbPosition <= CONFIG.EXIT_BB_MEAN_HIGH && pnlFromEntry > 0) {
-            logger.info(`📊 ${pos.symbol}: BB position ${bbPosition.toFixed(2)} in mean zone [${CONFIG.EXIT_BB_MEAN_LOW}-${CONFIG.EXIT_BB_MEAN_HIGH}], P&L +${(pnlFromEntry * 100).toFixed(2)}% → take profit short`);
-            await this.closePosition(pos, currentPrice, 'indicator_bb_mean');
-            continue;
-          }
-
-          // Price below both EMAs: profitable zone (+3.3% avg) → take profit if in profit
-          if (ema9 !== null && ema21 !== null && currentPrice < ema9 && currentPrice < ema21 && pnlFromEntry > 0) {
-            logger.info(`📊 ${pos.symbol}: Price $${currentPrice.toFixed(2)} below EMA9 & EMA21, P&L +${(pnlFromEntry * 100).toFixed(2)}% → take profit short`);
-            await this.closePosition(pos, currentPrice, 'indicator_ema_tp');
-            continue;
-          }
+        if (exitSignal) {
+          logger.info(`📊 ${pos.symbol}: Exit signal "${exitSignal}" → close ${pos.side}`);
+          await this.closePosition(pos, currentPrice, exitSignal);
+          continue;
         }
       }
 
@@ -387,6 +374,56 @@ export class IndependentTrader {
       logger.error(`Failed to fetch indicators for ${symbol}: ${error.message}`);
       return null;
     }
+  }
+
+  /**
+   * Check if any indicator-based exit signal is active for a given side and price.
+   * Used both as entry gate (don't open if exit would fire) and in managePositions.
+   *
+   * @param side - 'long' or 'short'
+   * @param price - current market price
+   * @param indicators - latest indicator values
+   * @param pnlFromEntry - P&L ratio from entry (optional, defaults to 0 for entry gate).
+   *   When > 0, profit-taking exits (EMA TP, BB mean) are active.
+   *   When called as entry gate (pnl=0), these fire unconditionally — because any
+   *   tiny price move would put us in profit and trigger the exit anyway.
+   * @param enteredOnBbBreakout - skip BB > 0.8 exit for breakout entries
+   * @returns exit signal name if exit would fire, null otherwise
+   */
+  private static checkIndicatorExit(
+    side: string,
+    price: number,
+    indicators: { rsi14: number | null; bbPosition: number | null; ema9: number | null; ema21: number | null },
+    pnlFromEntry: number = 0,
+    enteredOnBbBreakout: boolean = false,
+  ): string | null {
+    const { rsi14, bbPosition, ema9, ema21 } = indicators;
+
+    if (side === 'long') {
+      // BB > 0.8: 0% WR, -23% avg → exit (unless entered on BB breakout)
+      if (bbPosition !== null && bbPosition > CONFIG.EXIT_BB_UPPER && !enteredOnBbBreakout) {
+        return 'indicator_bb_upper';
+      }
+      // RSI > 70: 30% WR, -0.9% avg → exit
+      if (rsi14 !== null && rsi14 > CONFIG.EXIT_RSI_HIGH) {
+        return 'indicator_rsi_high';
+      }
+      // Price below both EMAs → take profit (requires in-profit for existing positions)
+      if (ema9 !== null && ema21 !== null && price < ema9 && price < ema21 && pnlFromEntry >= 0) {
+        return 'indicator_ema_tp';
+      }
+    } else {
+      // BB 0.4-0.6 (mean zone) → take profit short
+      if (bbPosition !== null && bbPosition >= CONFIG.EXIT_BB_MEAN_LOW && bbPosition <= CONFIG.EXIT_BB_MEAN_HIGH && pnlFromEntry >= 0) {
+        return 'indicator_bb_mean';
+      }
+      // Price below both EMAs → take profit short
+      if (ema9 !== null && ema21 !== null && price < ema9 && price < ema21 && pnlFromEntry >= 0) {
+        return 'indicator_ema_tp';
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -483,24 +520,27 @@ export class IndependentTrader {
       }
 
       // Execute the close
-      await HyperliquidConnector.marketClosePosition(
+      const orderResult = await HyperliquidConnector.marketClosePosition(
         tickerConfig,
         side === 'long',
         1, // close 100%
         exitPrice
       );
 
-      // Calculate P&L
-      const priceDiff = exitPrice - entryPrice;
+      // Use actual fill price from order response, fallback to market price
+      const fillPrice = HyperliquidConnector.getFillPrice(orderResult) ?? exitPrice;
+
+      // Calculate P&L using actual fill price
+      const priceDiff = fillPrice - entryPrice;
       const realizedPnl = side === 'long' ? priceDiff * size : -priceDiff * size;
       const realizedPnlPct = (priceDiff / entryPrice) * 100 * (side === 'long' ? 1 : -1);
 
-      // Update database
+      // Update database with actual fill price
       await prisma.independentPosition.update({
         where: { id },
         data: {
           status: 'closed',
-          exitPrice,
+          exitPrice: fillPrice,
           exitReason: reason,
           closedAt: new Date(),
           realizedPnl,
