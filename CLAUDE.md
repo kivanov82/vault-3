@@ -32,14 +32,14 @@ Copy trading and independent trading share the same scan cycle, asset metadata c
 - Our vault: `0xc94376c6e3e85dfbe22026d9fe39b000bcf649f0`
 - Vault leader: `0x3Fc6E2D6c0E1D4072F876f74E03d191e2cC61922`
 
-### Copy targets (multi-target)
-| Address | Type | Name | Strategy |
-|---|---|---|---|
-| `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` | vault | Bitcoin MA Long/Short | BTC-only, MA crossovers, 20x |
-| `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` | vault | Archangel Quant Fund I | BTC+SOL macro, 20x |
-| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others) — the original "Not In Employment Education or Training" vault leader |
+### Copy targets (multi-target — 2 currently live)
+| Address | Type | Name | Strategy | Status |
+|---|---|---|---|---|
+| `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` | vault | Bitcoin MA Long/Short | BTC-only, MA crossovers, 20x | LIVE |
+| `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` | vault | Archangel Quant Fund I | BTC+SOL macro, 20x | LIVE |
+| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others) | **DEFERRED** — see deploy postmortem below |
 
-All three addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints. The personal wallet (`0xbd9c...`) also trades on HL's `xyz` builder-code DEX (oil, BRENTOIL) — those positions are not currently copied (we only query the main perps DEX).
+All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints. The bd9c personal wallet also trades on HL's `xyz` builder-code DEX (oil, BRENTOIL) — those positions are not currently copied (we only query the main perps DEX).
 
 ### Portfolio split (conceptual budget; aggregation logic handles actual sizing)
 - ~25% per copy target × 3 targets
@@ -77,8 +77,9 @@ ENABLE_FUNDING_COLLECTION=true
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
 COPY_SCALE_MULTIPLIER=3.0
-COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
+COPY_TRADERS=0xb1505...,0x8c7b...
 ```
+(bd9c temporarily removed after the 2026-04-10 deploy incident — will be re-added with simultaneous `COPY_SCALE_MULTIPLIER` adjustment to avoid the rollout race.)
 
 ---
 
@@ -303,6 +304,21 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-04-10 — Deploy postmortem: Cloud Run rollout race
+
+When `gcloud run services update --update-env-vars` adds/removes a copy target, Cloud Run briefly runs the old + new revision concurrently during traffic shifting. The two revisions compute different target position sizes (because `aggregateTargetPositions` divides by `numTargets`) and execute conflicting actions on the same symbols within seconds.
+
+**Incident:** Adding bd9c as 3rd copy target on 2026-04-10 caused churn losses of ~$60 (BTC: -$59, FARTCOIN: -$1) over 18 seconds. The new revision correctly reduced positions by 33% (3-target math), then the old revision restored them (2-target math).
+
+**Mitigation in `aggregateTargetPositions` math:**
+- Adding/removing a copy target changes the divisor `(ourPortfolio / numTargets)`, which immediately rescales every existing position by `oldN/newN`.
+- To safely add a target without triggering position adjustments, simultaneously update `COPY_SCALE_MULTIPLIER` by `oldN/newN`. E.g. going 2 → 3 targets: `COPY_SCALE_MULTIPLIER 3.0 → 4.5`.
+- Long-term fix: refactor aggregation to not divide by `numTargets` (use sum of margin pcts directly, then re-tune the multiplier).
+
+**Action taken:** Reverted COPY_TRADERS to 2 targets, deployed code changes (symmetric shorts, etc.) separately. bd9c will be re-added later with the compensating COPY_SCALE_MULTIPLIER bump.
+
+---
 
 ### 2026-04-10 — Backtest framework, symmetric shorts, third copy target
 
