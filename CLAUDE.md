@@ -32,12 +32,12 @@ Copy trading and independent trading share the same scan cycle, asset metadata c
 - Our vault: `0xc94376c6e3e85dfbe22026d9fe39b000bcf649f0`
 - Vault leader: `0x3Fc6E2D6c0E1D4072F876f74E03d191e2cC61922`
 
-### Copy targets (multi-target — 2 currently live)
-| Address | Type | Name | Strategy | Status |
-|---|---|---|---|---|
-| `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` | vault | Bitcoin MA Long/Short | BTC-only, MA crossovers, 20x | LIVE |
-| `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` | vault | Archangel Quant Fund I | BTC+SOL macro, 20x | LIVE |
-| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others) | **DEFERRED** — see deploy postmortem below |
+### Copy targets (multi-target)
+| Address | Type | Name | Strategy |
+|---|---|---|---|
+| `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` | vault | Bitcoin MA Long/Short | BTC-only, MA crossovers, 20x |
+| `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` | vault | Archangel Quant Fund I | BTC+SOL macro, 20x |
+| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others) |
 
 All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints. The bd9c personal wallet also trades on HL's `xyz` builder-code DEX (oil, BRENTOIL) — those positions are not currently copied (we only query the main perps DEX).
 
@@ -77,9 +77,8 @@ ENABLE_FUNDING_COLLECTION=true
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
 COPY_SCALE_MULTIPLIER=3.0
-COPY_TRADERS=0xb1505...,0x8c7b...
+COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
 ```
-(bd9c temporarily removed after the 2026-04-10 deploy incident — will be re-added with simultaneous `COPY_SCALE_MULTIPLIER` adjustment to avoid the rollout race.)
 
 ---
 
@@ -322,6 +321,11 @@ Previously the formula divided by `numTargets`, which made adding/removing a tar
 - **Adding a target with 0 exposure has zero effect on existing positions**
 
 **Position sizing impact:** This deploy doubles existing position sizes (since the old formula's effective scale was `3.0/2 = 1.5x` with 2 targets, vs the new `3.0x`). Intentional — accepting one churn cycle to gain a more aggressive sizing model and a safe foundation for adding more copy targets.
+
+**Deployment outcome (2026-04-10 ~15:00 UTC):**
+- BTC short position cleanly grew from -0.03285 → -0.06574 in a single ADJUST action (no race, no churn)
+- bd9c added as 3rd copy target immediately after — zero new fills, zero impact (he's at 0% exposure, contributes 0 to netMarginPct sum)
+- Confirmed: the new formula is invariant to `numTargets` for unchanged signals
 
 ### 2026-04-10 — Deploy postmortem: Cloud Run rollout race
 
