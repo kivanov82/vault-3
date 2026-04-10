@@ -10,10 +10,11 @@ Vault-3 copies positions from a top-performing Hyperliquid vault while running a
 
 ### Current State (Phase 5)
 
-- **Copytrading**: Fully operational, +30% scaled position sizing
-- **Predictions**: v5 — indicator-based scoring with BTC macro regime detection
-- **Independent Trading**: v5.1 — indicator-based exits with 30min min hold, -10% hard stop
+- **Copytrading**: 3 targets (Bitcoin MA + Archangel + bd9c personal), aggregated via netMarginPct, COPY_SCALE_MULTIPLIER=3.0
+- **Predictions**: `momentum-v6` — indicator scoring with BTC macro regime detection
+- **Independent Trading**: v5.1 — symmetric longs/shorts at score ≥ 90, indicator-based exits, -10% hard stop, 72h max hold
 - **Infrastructure**: Google Cloud Run + Cloud SQL (PostgreSQL)
+- **Backtest framework**: full in-sample/OOS engine in `scripts/ml/backtest/`
 
 ---
 
@@ -41,12 +42,12 @@ npm start       # Production
 
 ### Copy Trading (every 5 min)
 
-1. Fetch positions from target vault and our vault
-2. Calculate scale factor: `(ourVault / targetVault) * 1.3`
+1. Fetch positions from each copy target (3 targets) and our vault
+2. Aggregate desired positions across targets via `netMarginPct × (ourPortfolio / numTargets) × COPY_SCALE_MULTIPLIER`
 3. For each symbol: OPEN, CLOSE, FLIP, or ADJUST as needed
 4. Execute with exact leverage matching, 1% slippage
 
-### Prediction Engine (v5)
+### Prediction Engine (`momentum-v6`)
 
 Runs before each copy cycle:
 
@@ -55,36 +56,37 @@ Runs before each copy cycle:
 3. Score each symbol (0-100) with indicator signals + regime bias
 4. Log predictions for paper trading validation
 
-### Independent Trading (v5)
+### Independent Trading (v5.1)
 
 Opens autonomous positions on high-confidence signals:
 
-- **Entry**: Score >= 90 (LONG) or >= 95 (SHORT), whitelist symbol, no existing position
-- **Exit**: Indicator-based (BB > 0.8 unless breakout entry, RSI > 70, price < EMAs, BB mean reversion)
-- **Safety**: -10% hard stop, 72h max hold, target confirmation/opposite handling
-- **Allocation**: 10% of vault, max 3 positions, 5x leverage
+- **Entry**: Score ≥ 90 for **both** longs and shorts (symmetric), whitelist symbol, no existing position
+- **Exit**: Indicator-based (BB > 0.8 unless breakout entry, RSI > 70, price < EMAs, BB mean reversion for shorts)
+- **Safety**: -10% hard stop (price move), 72h max hold, target confirmation/opposite handling
+- **Allocation**: 30% of vault, max 5 positions, 5x leverage
+- **Whitelist**: HYPE, SOL, VVV, ETH, MON, FARTCOIN
 
 ---
 
 ## Configuration
 
 ```bash
-# Copytrading
-COPY_TRADER=0x4cb5f4d145cd16460932bbb9b871bb6fd5db97e3
+# Copytrading (multi-target — comma-separated)
+COPY_TRADERS=0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768,0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0,0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
-COPY_SCALE_MULTIPLIER=1.3
+COPY_SCALE_MULTIPLIER=3.0
 
 # Phase Control
 ENABLE_COPY_TRADING=true
 ENABLE_INDEPENDENT_TRADING=true
 
-# Independent Trading
-INDEPENDENT_MAX_ALLOCATION_PCT=0.10
-INDEPENDENT_MAX_POSITIONS=3
-INDEPENDENT_LEVERAGE=5
-INDEPENDENT_HARD_STOP_PCT=0.10
-INDEPENDENT_MAX_HOLD_HOURS=72
+# Independent Trading (all use code defaults — uncomment to override)
+# INDEPENDENT_MAX_ALLOCATION_PCT=0.30   # default 0.30
+# INDEPENDENT_MAX_POSITIONS=5           # default 5
+# INDEPENDENT_LEVERAGE=5                # default 5
+# INDEPENDENT_HARD_STOP_PCT=0.10        # default 0.10 (-10% price move)
+# INDEPENDENT_MAX_HOLD_HOURS=72         # default 72
 
 # Database
 DATABASE_URL=postgresql://user:pass@host:5432/db

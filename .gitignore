@@ -54,6 +54,9 @@ temp/
 export/*.csv
 data/*.csv
 
+# Backtest / analysis outputs
+scripts/ml/output/
+
 # Docker
 .dockerignore
 

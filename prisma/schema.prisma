@@ -260,14 +260,14 @@ model AnalysisReport {
 model IndependentPosition {
   id                String   @id @default(uuid())
   symbol            String
-  side              String   // 'long' (shorts disabled - 0% historical win rate)
+  side              String   // 'long' | 'short'
   entryPrice        Float
   size              Float
   sizeUsd           Float
   leverage          Int
-  tpPrice           Float    // entry * 1.08 (8% take profit)
-  slPrice           Float    // entry * 0.96 (4% stop loss)
-  timeoutAt         DateTime // +24h from entry
+  tpPrice           Float    // unused in v5 (indicator-based exits)
+  slPrice           Float    // unused in v5 (hard stop replaces SL)
+  timeoutAt         DateTime // +MAX_HOLD_HOURS from entry
   status            String   @default("open") // open|confirmed|closed
   confirmedByTarget Boolean  @default(false)
   exitPrice         Float?
@@ -281,4 +281,70 @@ model IndependentPosition {
 
   @@index([symbol, status])
   @@index([status])
+}
+
+// A single backtest run — one row per (strategy variant, window) combination.
+model BacktestRun {
+  id              String   @id @default(uuid())
+  name            String   // human-readable ("baseline_v5.1", "no_ema_tp", etc.)
+  description     String?
+  strategyVersion String   // e.g. "momentum-v6"
+  windowStart     DateTime
+  windowEnd       DateTime
+  symbols         String[] // symbols included in the run
+  config          Json     // full config snapshot (score thresholds, exit rules, etc.)
+
+  // Aggregated results
+  totalTrades     Int      @default(0)
+  wins            Int      @default(0)
+  losses          Int      @default(0)
+  totalPnl        Float    @default(0)
+  totalPnlPct     Float    @default(0)
+  avgPnlPct       Float    @default(0)
+  winRate         Float    @default(0)
+  maxDrawdownPct  Float    @default(0)
+  sharpe          Float?
+
+  createdAt       DateTime @default(now())
+  trades          BacktestTrade[]
+
+  @@index([name])
+}
+
+// Individual simulated trade within a backtest run.
+model BacktestTrade {
+  id                String   @id @default(uuid())
+  runId             String
+  run               BacktestRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  symbol            String
+  side              String   // 'long' | 'short'
+  entryTime         DateTime
+  entryPrice        Float
+  exitTime          DateTime?
+  exitPrice         Float?
+  exitReason        String?  // indicator_bb_upper|indicator_rsi_high|indicator_ema_tp|hard_stop|timeout|target_opposite|target_confirmed|window_end
+  holdHours         Float?
+
+  sizeUsd           Float    // Notional size (fixed per run)
+  leverage          Int
+  realizedPnl       Float?
+  realizedPnlPct    Float?   // Price-move % (not leverage-adjusted)
+
+  // Scoring context
+  predictionScore   Float
+  predictionReasons String[]
+
+  // Snapshot of entry-time indicators for debugging
+  entryRsi14        Float?
+  entryBbPos        Float?
+  entryMacdHist     Float?
+  entryEma9         Float?
+  entryEma21        Float?
+
+  createdAt         DateTime @default(now())
+
+  @@index([runId])
+  @@index([runId, symbol])
+  @@index([runId, exitReason])
 }

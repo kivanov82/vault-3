@@ -67,9 +67,9 @@ const CONFIG = {
   EXIT_BB_MEAN_LOW: 0.4, // SHORT: BB 0.4-0.6 = 83% WR → take profit at mean
   EXIT_BB_MEAN_HIGH: 0.6,
 
-  // Score thresholds
+  // Score thresholds — symmetric for longs and shorts
   MIN_SCORE_LONG: 90,
-  MIN_SCORE_SHORT: 95,  // Higher bar for shorts (small sample in analysis)
+  MIN_SCORE_SHORT: 90,
 
   // Whitelist: proven performers from target vault cycle analysis
   WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'MON', 'FARTCOIN'],
@@ -275,7 +275,7 @@ export class IndependentTrader {
           }
         }
 
-        // === 2. HARD STOP - always active (-5% from entry) ===
+        // === 2. HARD STOP - always active (-10% price move, configurable via INDEPENDENT_HARD_STOP_PCT) ===
         const pnlFromEntry = pos.side === 'long'
           ? (currentPrice - pos.entryPrice) / pos.entryPrice
           : (pos.entryPrice - currentPrice) / pos.entryPrice;

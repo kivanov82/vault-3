@@ -1,258 +1,188 @@
-# Vault-3: Hyperliquid Copytrading Bot - Technical Documentation
+# Vault-3: Hyperliquid Copytrading Bot
 
-**Project Status:** Phase 5 - Optimization & Scaling
-**Last Updated:** 2026-04-04
+**Project Status:** Phase 5 — Optimization & Scaling
+**Last Updated:** 2026-04-10
 
----
-
-## Current State
-
-✅ **Multi-target copytrading bot** with integrated prediction system and autonomous trading capability.
-
-### Configuration
-
-- **Our Vault:** `0xc94376c6e3e85dfbe22026d9fe39b000bcf649f0` (vault-3)
-- **Vault Leader:** `0x3Fc6E2D6c0E1D4072F876f74E03d191e2cC61922`
-- **Copy Targets (multi-target):**
-  - `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` — Bitcoin MA Long/Short (BTC-only, MA strategy, 20x)
-  - `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` — Archangel Quant Fund I (BTC+SOL macro, 20x)
-- **Portfolio Split:** 30% copy target 1 / 30% copy target 2 / 30% independent / 10% buffer
-- **Copy Scale Multiplier:** 3.0 (aggressive — targets use ~4-6% margin, we target ~12-18%)
-- **Copy Strategy:** Position-based with scaled sizing, aggregated across targets
-- **Leverage:** Exact 1:1 match with target
-- **Scan Interval:** 5 minutes (configurable)
-- **Slippage:** 1% for market orders
-- **Infrastructure:** Google Cloud Run + Cloud SQL (PostgreSQL)
+A multi-target copytrading bot for Hyperliquid with an integrated autonomous trading module that runs alongside copy trading.
 
 ---
 
-## Target Vault Strategy Profile
+## Architecture at a glance
 
-Based on analysis of 75 days of data (20,787 fills, 71 symbols):
+Every 5 minutes the bot:
 
-### Strategy Type: Momentum/Breakout Accumulator
+1. Fetches our portfolio + market prices
+2. Fetches each copy target's portfolio (sequentially, to avoid HL RPC rate limits)
+3. Aggregates desired positions across targets (sums scaled sizes per symbol/direction)
+4. Runs predictions for all symbols (`PredictionLogger`, `momentum-v6`)
+5. Processes independent trading signals (`IndependentTrader`, if enabled)
+6. Manages open independent positions (indicator-based exits)
+7. Executes copy trades (copy trading always overrides independent on conflict)
+8. Periodically validates past predictions against 4h forward price moves
 
-| Characteristic | Detail |
-|----------------|--------|
-| Entry Style | Breakout buying (65% at upper price range) |
-| Execution | TWAP accumulation (avg 9.5 consecutive fills) |
-| Leverage | Conservative (avg 4.8x) |
-| BTC Behavior | Trade alts when BTC calm, same direction (77% correlation) |
-| Session Pattern | Accumulate Asia/EU (89%/78% buys), trim US (65%) |
-| Directional Bias | Long-heavy (64%) |
-| Focus Assets | Memecoins/altcoins (HYPE, VVV, SPX, FARTCOIN, MON) |
-
-### Entry Behavior by Symbol
-
-| Symbol | Breakout Buys | Dip Buys |
-|--------|--------------|----------|
-| HYPE   | 65%          | 35%      |
-| BTC    | 69%          | 31%      |
-| VVV    | 56%          | 44%      |
-| SKY    | 55%          | 45%      |
+Copy trading and independent trading share the same scan cycle, asset metadata cache, and prediction output.
 
 ---
 
-## Independent Trading System
+## Live Configuration
 
-Autonomous trading based on high-confidence prediction signals, running alongside copy trading.
+**Deployment:** Google Cloud Run (`vault-3`) + Cloud SQL (PostgreSQL).
 
-### How It Works
+### Vault & wallets
+- Our vault: `0xc94376c6e3e85dfbe22026d9fe39b000bcf649f0`
+- Vault leader: `0x3Fc6E2D6c0E1D4072F876f74E03d191e2cC61922`
 
+### Copy targets (multi-target)
+| Address | Type | Name | Strategy |
+|---|---|---|---|
+| `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` | vault | Bitcoin MA Long/Short | BTC-only, MA crossovers, 20x |
+| `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` | vault | Archangel Quant Fund I | BTC+SOL macro, 20x |
+| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others) — the original "Not In Employment Education or Training" vault leader |
+
+All three addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints. The personal wallet (`0xbd9c...`) also trades on HL's `xyz` builder-code DEX (oil, BRENTOIL) — those positions are not currently copied (we only query the main perps DEX).
+
+### Portfolio split (conceptual budget; aggregation logic handles actual sizing)
+- ~25% per copy target × 3 targets
+- 25% independent trading
+- buffer from aggregation dilution when targets disagree
+
+Aggregation math: `ourMargin = netMarginPct × (ourPortfolio / numTargets) × COPY_SCALE_MULTIPLIER`. With 3 agreeing targets at 5% margin each, effective size is unchanged from 2 agreeing targets. When targets disagree, the net margin is reduced (diluted).
+
+### Copy trading
+- Mode: `scaled`, position-based
+- Scale multiplier: **3.0** (targets use ~4–6% margin → we target ~12–18%)
+- Leverage: exact 1:1 with target
+- Slippage: 1% for market orders
+- Scan interval: 5 minutes
+
+### Independent trading (autonomous module)
+| Setting | Value |
+|---|---|
+| Max allocation | 30% of vault |
+| Max concurrent positions | 5 |
+| Leverage | 5x |
+| Max hold | 72h |
+| Hard stop | **-10%** from entry (price move, not margin) |
+| Min score (LONG) | 90 |
+| Min score (SHORT) | 90 (symmetric with long) |
+| Whitelist | HYPE, SOL, VVV, ETH, MON, FARTCOIN |
+| Scoring model | `momentum-v6` |
+
+### Live environment variables (Cloud Run)
+Only these are set; everything else uses the code defaults shown above.
 ```
-Signal Detection (score ≥ 90 LONG / ≥ 95 SHORT, whitelist symbol)
-    ↓
-  OPEN position → Check every 5 min:
-    ├─ Target confirmed same direction? → Hand to copy trading
-    ├─ Target opened opposite? → Close immediately
-    ├─ Hard stop: -5% from entry → Close immediately
-    ├─ Indicator exit signal? → Close (BB/RSI/EMA based)
-    └─ Max hold 72h? → Close at market
-```
-
-### Parameters
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Max allocation | 10% of vault | On top of copy trading allocation |
-| Max positions | 3 concurrent | ~3.3% each |
-| Min score (LONG) | 90 | Very high confidence only |
-| Min score (SHORT) | 95 | Higher bar for shorts |
-| Leverage | 5x | Matches target avg (4.8x rounded) |
-| Copy scale | +30% (1.3x) | COPY_SCALE_MULTIPLIER=1.3 |
-| Exit strategy | v5.1: indicator-based | BB, RSI, EMA signals (BB exit skipped on breakout entries) + hard stop + timeout |
-| Whitelist | HYPE, SOL, VVV, ETH, MON, FARTCOIN | From cycle analysis |
-
-### Exit Strategy (v5 - Indicator-Based)
-
-| Signal | Direction | Condition | Data Basis |
-|--------|-----------|-----------|------------|
-| BB Upper | LONG exit | BB position > 0.8 | 0% WR, -23% avg at upper band |
-| RSI High | LONG exit | RSI > 70 | 30% WR, -0.9% avg overbought |
-| EMA TP | LONG exit | Price < EMA9 AND EMA21 + in profit | +11.4% avg P&L below both EMAs |
-| BB Mean | SHORT exit | BB 0.4-0.6 + in profit | 83% WR, +4.2% avg at mean |
-| EMA TP | SHORT exit | Price < EMA9 AND EMA21 + in profit | +3.3% avg P&L |
-| Hard Stop | Both | -10% from entry | Target median loss -4%, avg -8%; only 11% beyond -10% |
-| Timeout | Both | 72h max hold | Safety net |
-
-### Conflict Resolution
-
-| Scenario | Action |
-|----------|--------|
-| Target opens same position | Mark confirmed, copy trading takes over sizing |
-| Target opens opposite | Close independent position immediately |
-| Copy wants to close unconfirmed | Skip - let independent TP/SL/timeout manage |
-
-### Monitoring
-
-```bash
-npm run ml:independent-stats   # View independent trading performance
+ENABLE_COPY_TRADING=true
+ENABLE_INDEPENDENT_TRADING=true
+ENABLE_FUNDING_COLLECTION=true
+COPY_MODE=scaled
+COPY_POLL_INTERVAL_MINUTES=5
+COPY_SCALE_MULTIPLIER=3.0
+COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
 ```
 
 ---
 
-## Prediction System (v5 - Indicator + Macro Regime)
+## Independent Trading: Entry & Exit Logic
 
-The bot runs predictions alongside copy trading using indicator signals and BTC macro regime detection.
+### Entry criteria (all must hold)
+- Symbol on whitelist
+- Prediction score ≥ 90 (same threshold for longs and shorts)
+- No existing position (copy or independent) on that symbol
+- Target has no position on that symbol (defer to copy trading if they do)
+- Under max allocation and max-positions limits
+- **Pre-check:** no indicator exit rule would fire immediately (prevents instant-close)
 
-### How It Works
+### Exit rules (checked every scan cycle)
 
-Every 5 minutes (integrated into copy trading cycle):
+| Priority | Rule | Applies to | Condition |
+|---|---|---|---|
+| 1 | Target confirmation | both | Target opens same direction → mark confirmed, copy trading takes over |
+| 2 | Target opposite | both | Target opens opposite direction → close immediately |
+| 3 | Hard stop | both | Price moved ≥ 10% against entry → close |
+| 4 | Max hold | both | Position held ≥ 72h → close at market |
+| 5 | BB upper | long | `bbPosition > 0.8` (skipped if entered on `bb_breakout_above`) |
+| 6 | RSI high | long | `rsi14 > 70` |
+| 7 | EMA take-profit | long | `price < ema9 && price < ema21` AND in profit |
+| 5' | BB mean | short | `0.4 ≤ bbPosition ≤ 0.6` AND in profit |
+| 6' | EMA take-profit | short | `price < ema9 && price < ema21` AND in profit |
 
-```
-1. Fetch target & our positions
-2. Collect market data (210 candles per symbol, indicators)
-3. 🔮 Run predictions BEFORE copy actions
-   - Detect BTC macro regime (bull/bear/neutral)
-   - Score each symbol (0-100) with indicator signals
-   - Predict direction (long/short)
-4. 🎯 Process independent trading signals (if enabled)
-5. 📊 Manage independent positions (indicator-based exits)
-6. Execute copy trades (unchanged behavior)
-7. Every 36 hours: Validate paper P&L
-```
+Indicator exits (5–7) require at least 1 hour of holding so they don't contradict entry signals.
 
-### BTC Macro Regime Detection (v5)
+---
 
-Target shifted $1.8M long → $10.4M short when BTC dropped 24% ($92K→$70K).
+## Prediction Scoring: momentum-v6
+
+Base score: **50**. High confidence threshold: **65**. Independent threshold: **90**.
+
+Factors (from `PredictionLogger.ts`):
+
+| Factor | Points | Direction signal | Trigger |
+|---|---|---|---|
+| MACD bullish | +8 | LONG ×2 | `macdHist > 0` |
+| MACD bearish | +5 | SHORT ×2 | `macdHist < 0` |
+| RSI breakout | +8 | LONG ×2 | `rsi14 > 70` |
+| RSI oversold | +8 | LONG ×2 | `rsi14 < 30` |
+| BB breakout above | +10 | LONG ×2 | Price above upper BB |
+| BB lower touch | +10 | LONG ×2 | Price below lower BB |
+| BB short zone | 0 | SHORT | `0.2 ≤ bbPosition ≤ 0.4` |
+| BB squeeze | +5 | — | `bbWidth < 0.02` |
+| EMA bullish | +3 | LONG | `ema9 > ema21` |
+| Dip entry | +8 | LONG | `priceChange1h < -0.5%` |
+| Chasing momentum | -3 | — | `priceChange1h > 1%` (penalty) |
+| Trend up 4h | +5 | LONG | `priceChange4h > 1%` |
+| Trend down 4h | +5 | SHORT | `priceChange4h < -1%` |
+| Price breakout | +10 | LONG | Price position > 0.7 |
+| Price dip | +5 | LONG | Price position < 0.3 |
+| Macro bull | +10 | LONG ×2 | BTC regime bullish |
+| Macro bear | +10 | SHORT ×2 | BTC regime bearish |
+| Macro neutral | -5 | — | Neutral regime (worst for P&L) |
+| BTC 1h up | 0 | LONG | `btcChange1h > 0.3%` |
+| BTC 1h down | 0 | SHORT | `btcChange1h < -0.3%` |
+| US session | +10 | — | hours 16–23 UTC |
+| Europe session | +6 | — | hours 8–15 UTC |
+| Asia session | -3 | — | hours 0–7 UTC |
+| Always-long symbol | +5 | LONG | symbol in `ALWAYS_LONG_SYMBOLS` |
+| Top symbol | +5 | — | symbol in `TOP_SYMBOLS` |
+| Secondary symbol | +3 | — | symbol in `SECONDARY_SYMBOLS` |
+| High volatility | +3 | — | `atrPercent > 5` |
+| Positive funding | 0 | LONG | `fundingRate > 0.02` |
+| Negative funding | 0 | SHORT | `fundingRate < -0.01` |
+| Confirmed short | +8 | SHORT | 3+ short signals + bearish MACD |
+
+### BTC macro regime detection
+
+Target traders shift entire portfolios based on BTC macro trend, not short-term moves.
 
 | Signal | Bearish | Bullish |
-|--------|---------|---------|
+|---|---|---|
 | BTC vs EMA50 | Below (-1) | Above (+1) |
 | BTC vs EMA200 | Below (-1) | Above (+1) |
-| BTC MACD | Bearish (-1) | Bullish (+1) |
+| BTC MACD histogram | Negative (-1) | Positive (+1) |
 | BTC 7d change | < -5% (-2) | > +5% (+2) |
-| BTC RSI | < 30 (bounce +1) | > 70 (noted) |
+| BTC RSI | < 30 (+1 bounce) | > 70 (noted) |
 
-Score <= -2 = **bear regime** (+10 score, +2 short signals, tie→short)
-Score >= +2 = **bull regime** (+10 score, +2 long signals, tie→long)
-
-### Prediction Scoring (v5)
-
-| Factor | Points | Direction | Condition |
-|--------|--------|-----------|-----------|
-| MACD bullish | +8 | LONG x2 | MACD histogram > 0 (strongest signal) |
-| MACD bearish | +5 | SHORT x2 | MACD histogram < 0 (91% accuracy) |
-| RSI breakout | +8 | LONG x2 | RSI > 70 (breakout buyer) |
-| RSI oversold | +8 | LONG x2 | RSI < 30 |
-| BB breakout | +10 | LONG x2 | Price above upper BB |
-| BB lower touch | +10 | LONG x2 | Price below lower BB |
-| BB short zone | - | SHORT | BB position 0.2-0.4 (38% of shorts) |
-| EMA bullish | +3 | LONG | EMA9 > EMA21 |
-| Momentum 1h | +10/+5 | LONG/SHORT | 1h change > 0.5% / < -0.5% |
-| Trend 4h | +8/+5 | LONG/SHORT | 4h change > 1% / < -1% |
-| Macro regime | +10 | LONG or SHORT | Bull/bear regime detection |
-| Session | +3-8 | - | EU (+8), US (+5), Asia (+3) |
-| Confirmed short | +8 | SHORT | 3+ short signals + MACD bearish |
-
-**Base score:** 50 | **High confidence:** ≥ 65 | **Independent threshold:** ≥ 80
-
-### Paper Trading Validation
-
-After 4 hours (target holds positions longer), each prediction is validated:
-- Entry price vs exit price
-- Paper P&L calculated based on predicted direction
-- Direction correctness tracked separately from P&L
-
-### Monitoring
-
-```bash
-npm run ml:stats       # View prediction performance (momentum-v2)
-npm run ml:strategy    # Full strategy analysis
-npm run ml:deep        # Deep behavioral analysis
-```
-
----
-
-## Technical Implementation
-
-### Multi-Target Position-Based Copytrading
-
-**Core Logic** (every 5 minutes):
-
-1. Check database connection health (auto-reconnect if needed)
-2. Fetch our portfolio and all market prices
-3. Fetch each copy target's portfolio and positions **sequentially** (avoids HL RPC rate limits)
-4. **Aggregate** desired positions across all targets:
-   - Sum scaled sizes for same symbol/direction across targets
-   - If targets disagree on direction, larger notional side wins
-   - Scale factor per target: `(ourPortfolio / numTargets / targetPortfolio) * COPY_SCALE_MULTIPLIER`
-5. **Run predictions for all symbols** (shadow mode)
-6. **Process independent trading signals** (if enabled, copy always takes precedence)
-7. **Manage independent positions** (indicator-based exits)
-8. For each aggregated symbol (one pass, no duplicates):
-   - Compare aggregated desired position vs. our position
-   - Copy overrides independent: force-close independent on conflict
-   - Determine action: OPEN, CLOSE, FLIP, or ADJUST
-   - Apply risk checks (min margin $5, min position $10)
-   - Execute trade with exact leverage matching (1% slippage)
-   - **Log prediction outcome** (what action was actually taken)
-9. Finalize predictions for symbols with no action
-10. Periodically validate past predictions (paper P&L)
-
-**Position Actions:**
-- **OPEN**: Target(s) have position, we don't → Open new position (override independent if needed)
-- **CLOSE**: No target holds symbol, we still have position → Close (unless unconfirmed independent)
-- **FLIP**: Aggregated target wants opposite direction → Close + Open opposite (override independent)
-- **ADJUST**: Same direction but size differs >10% → Increase or decrease
+- Regime signal ≤ -2 → **bear**: +10 score, +2 short signals, tie-breaker flips long→short
+- Regime signal ≥ +2 → **bull**: +10 score, +2 long signals
+- Otherwise → **neutral**: -5 score (neutral regimes have historically lost money)
 
 ---
 
 ## Database Schema
 
-### Core Tables
-
+### Core tables
 | Table | Description |
-|-------|-------------|
-| Fill | Raw fill events from exchange |
-| Trade | Aggregated logical trades (copy trades logged here) |
-| Candle | OHLCV data (multi-timeframe) |
-| FundingRate | 8-hour funding epochs |
-| TechnicalIndicator | RSI, MACD, BB, EMA, ATR |
-| Prediction | Shadow mode predictions with paper P&L |
-| IndependentPosition | Autonomous trading positions |
+|---|---|
+| `Fill` | Raw fills from Hyperliquid (for TWAP detection) |
+| `Trade` | Aggregated logical trades (our trades + target trades) |
+| `Candle` | OHLCV data with basic indicators (rsi14, macd, bb, atr) |
+| `TechnicalIndicator` | Full indicator set (adds ema9/21/50/200, bbWidth) |
+| `FundingRate` | 8-hour funding epochs |
+| `Prediction` | Shadow mode predictions with paper P&L validation |
+| `IndependentPosition` | Live autonomous trading positions |
+| `BacktestRun` / `BacktestTrade` | Backtest simulation runs |
 
-### IndependentPosition Table Fields
-
-| Field | Description |
-|-------|-------------|
-| symbol | Trading symbol |
-| side | Position side ('long') |
-| entryPrice | Entry price |
-| size | Position size in asset units |
-| sizeUsd | Position size in USD |
-| leverage | Leverage used |
-| tpPrice | Take profit price (entry * 1.08) |
-| slPrice | Stop loss price (entry * 0.96) |
-| timeoutAt | Max hold time (+24h from entry) |
-| status | open, confirmed, closed |
-| confirmedByTarget | Whether target opened same position |
-| exitPrice | Exit price (when closed) |
-| exitReason | tp, sl, timeout, target_confirmed, target_opposite |
-| realizedPnl | Actual P&L in USD |
-| realizedPnlPct | P&L as percentage |
-| predictionScore | Score that triggered entry |
-| predictionReasons | Signals that triggered entry |
+### IndependentPosition key fields
+`symbol`, `side`, `entryPrice`, `size`, `sizeUsd`, `leverage`, `timeoutAt`, `status` (open/confirmed/closed), `confirmedByTarget`, `exitPrice`, `exitReason`, `closedAt`, `realizedPnl`, `realizedPnlPct`, `predictionScore`, `predictionReasons`.
 
 ---
 
@@ -260,31 +190,51 @@ npm run ml:deep        # Deep behavioral analysis
 
 ```
 src/
-├── index.ts                              # Express server
+├── index.ts                            # Express server
 ├── service/
-│   ├── Vault3.ts                         # Orchestrator
+│   ├── Vault3.ts                       # Orchestrator
 │   ├── trade/
-│   │   ├── CopyTradingManager.ts         # Position-based syncing + prediction integration
-│   │   ├── IndependentTrader.ts          # Autonomous trading module
-│   │   └── HyperliquidConnector.ts       # Exchange API
+│   │   ├── CopyTradingManager.ts       # Multi-target position syncing + prediction integration
+│   │   ├── IndependentTrader.ts        # Autonomous trading (entry + exit + conflict resolution)
+│   │   └── HyperliquidConnector.ts     # Hyperliquid API client
 │   ├── data/
-│   │   └── StartupSync.ts                # Startup synchronization
+│   │   ├── MarketDataCollector.ts      # Live candle/indicator collection
+│   │   └── StartupSync.ts              # Startup state synchronization
 │   ├── ml/
-│   │   ├── PredictionLogger.ts           # Live prediction logging & validation
-│   │   ├── PredictionEngine.ts           # Pattern-matching predictor
-│   │   └── FeatureEngine.ts              # Feature generator
+│   │   ├── PredictionLogger.ts         # momentum-v6 scoring + live prediction logging
+│   │   ├── PredictionEngine.ts         # Prediction engine (unused by live path now)
+│   │   └── FeatureEngine.ts            # Feature generator
 │   └── utils/
-│       ├── logger.ts                     # Logging
-│       └── indicators.ts                 # Technical indicators
+│       ├── logger.ts
+│       └── indicators.ts               # rsi, macd, bb, ema, atr, stoch, adx, williams, obv
 
 scripts/ml/
-├── run-predictions.ts                    # Manual prediction testing
-├── prediction-stats.ts                   # View prediction stats (momentum-v2)
-├── independent-stats.ts                  # View independent trading stats
-├── strategy-analysis.ts                  # Basic strategy analysis
-├── deep-strategy-analysis.ts             # Deep behavioral analysis
-├── save-strategy-report.ts               # Save analysis to DB
-└── cleanup-predictions.ts                # Archive old predictions
+├── backtest/                           # Backtest engine (strategy.ts + engine.ts + sentiment.ts)
+│   ├── strategy.ts                     # v6 + v7 scoring functions, exit logic
+│   ├── engine.ts                       # Backtest runner with pluggable scorers
+│   └── sentiment.ts                    # Sentiment panel builder + rule table
+├── run-backtest.ts                     # Run strategy variants and persist to BacktestRun
+├── run-backtest-oos.ts                 # Out-of-sample validation runner
+├── run-threshold-sweep.ts              # Sentiment threshold parameter sweep
+├── run-majors-sentiment-test.ts        # Test sentiment on BTC/ETH/SOL whitelist
+├── run-no-vvv-test.ts                  # Ex-VVV sanity check
+├── backfill-indicators.ts              # Compute & persist historical indicators
+├── backfill-sentiment-fills.ts         # Fetch Archangel + Bitcoin MA historical fills
+├── backfill-higher-tf-candles.ts       # Fetch 4h + 1d candles
+├── backfill-oos-data.ts                # Combined OOS data backfill
+├── sentiment-correlation.ts            # Sentiment vs target correlation analysis
+├── target-lifecycle-v2.ts              # Target position lifecycle (NEW/ADD/REDUCE/CLOSE/FLIP)
+├── position-state-correlation.ts       # Position state (not fill) correlation with sentiment
+├── target-behavior.ts                  # Target entry signature analysis
+├── compute-baselines.ts                # Target P&L + buy-and-hold baselines
+├── weekly-independent-analysis.ts      # Past N-day independent trading performance
+├── independent-stats.ts                # All-time independent trading stats
+├── prediction-stats.ts                 # Prediction scoring stats
+├── run-predictions.ts                  # Manual prediction test
+├── strategy-analysis.ts                # Target strategy analysis
+├── deep-strategy-analysis.ts           # Deep behavioral analysis
+├── historical-trade-analysis.ts        # Historical trade analysis
+└── cleanup-predictions.ts              # Archive old predictions
 ```
 
 ---
@@ -292,23 +242,31 @@ scripts/ml/
 ## Development Commands
 
 ```bash
-# Start bot
-npm start               # Production
-npm run dev             # Development (auto-restart)
+# Run
+npm start                                 # Production
+npm run dev                               # Dev with auto-restart
 
 # Database
-npx prisma studio       # Web UI
-npx prisma generate     # Regenerate client
-npx prisma db push      # Push schema changes
+npx prisma studio                         # Web UI
+npx prisma generate                       # Regenerate client
+npx prisma db push                        # Push schema changes
 
-# Prediction Monitoring
-npm run ml:stats              # View prediction performance (momentum-v2)
-npm run ml:independent-stats  # View independent trading stats
-npm run ml:predict            # Manual prediction test
-npm run ml:strategy           # Full strategy analysis
-npm run ml:deep               # Deep behavioral analysis
-npm run ml:save-report        # Save analysis report to DB
-npm run ml:cleanup            # Archive old predictions
+# Monitoring
+npm run ml:stats                          # Prediction performance (momentum-v6)
+npm run ml:independent-stats              # All-time independent stats
+npx tsx scripts/ml/weekly-independent-analysis.ts   # Past N days
+
+# Analysis
+npm run ml:strategy                       # Target strategy analysis
+npm run ml:deep                           # Deep behavioral analysis
+
+# Backtest (local analysis — uses in-DB historical candles/indicators/fills)
+npx tsx scripts/ml/backfill-indicators.ts      # (one-off) Compute historical indicators
+npx tsx scripts/ml/backfill-sentiment-fills.ts # Fetch Archangel + Bitcoin MA historical fills
+npx tsx scripts/ml/run-backtest.ts             # Run in-sample strategy variants
+npx tsx scripts/ml/run-backtest-oos.ts         # Run OOS validation
+npx tsx scripts/ml/run-threshold-sweep.ts      # Sweep sentiment threshold values
+npx tsx scripts/ml/compute-baselines.ts        # Compute target P&L + B&H baselines
 
 # Deployment
 npm run docker-build
@@ -318,236 +276,55 @@ npm run docker-push
 
 ---
 
-## Environment Configuration
-
-```bash
-# Copytrading (multi-target: comma-separated addresses)
-COPY_TRADERS=0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768,0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0
-COPY_MODE=scaled
-COPY_POLL_INTERVAL_MINUTES=5
-COPY_SCALE_MULTIPLIER=3.0            # 3x larger than proportional (targets use ~4-6% margin)
-
-# Phase Control
-ENABLE_COPY_TRADING=true
-ENABLE_INDEPENDENT_TRADING=false  # Set to true to enable autonomous trading
-
-# Independent Trading
-INDEPENDENT_MAX_ALLOCATION_PCT=0.10   # 10% of vault
-INDEPENDENT_MAX_POSITIONS=3           # Max concurrent positions
-INDEPENDENT_LEVERAGE=5                # 5x leverage
-INDEPENDENT_USE_TIME_EXIT=true        # v3: time-based exit (no TP/SL)
-INDEPENDENT_HOLD_HOURS=4              # v3: 4h fixed hold
-INDEPENDENT_HARD_STOP_PCT=0.10        # -10% price move hard stop (target median loss -4%, avg -8%)
-INDEPENDENT_TP_PCT=0.20               # only used if USE_TIME_EXIT=false
-INDEPENDENT_SL_PCT=0.12               # only used if USE_TIME_EXIT=false
-
-# Risk Management
-MIN_POSITION_SIZE_USD=5
-POSITION_ADJUST_THRESHOLD=0.1
-
-# Database
-DATABASE_URL=postgresql://user:pass@host:5432/db
-```
-
----
-
 ## Risk Management
 
-### Built-in Safeguards
-
-- **Minimum margin:** $5 USD (configurable)
-- **Minimum position value:** $10 USD (exchange requirement)
-- **Position scaling:** Proportional to vault size ratio
-- **Leverage matching:** Exact replication for copy trades
-- **Database health:** Auto-reconnect on failures
-- **Error recovery:** Global handlers prevent crashes
-- **Slippage control:** 1% for market orders
-- **Independent allocation cap:** Max 3% of vault for autonomous trades
-- **TP/SL management:** Automatic exit on independent positions
-
-### Manual Controls
-
-- `MIN_POSITION_SIZE_USD` - Increase to avoid small positions
-- `COPY_POLL_INTERVAL_MINUTES` - Adjust scan frequency
-- `ENABLE_COPY_TRADING=false` - Emergency stop for copy trading
-- `ENABLE_INDEPENDENT_TRADING=false` - Disable autonomous trading
+- Minimum margin: $5 USD
+- Minimum position value: $10 USD (exchange requirement)
+- Slippage control: 1% for market orders
+- Database health: auto-reconnect on failures
+- Global error handlers prevent crashes
+- `ENABLE_COPY_TRADING=false` — emergency stop for copy trading
+- `ENABLE_INDEPENDENT_TRADING=false` — disable autonomous trading
 
 ---
 
-## Roadmap
+## Roadmap — Phase 5: Optimization & Scaling
 
-### Phase 1: Copytrading ✅ Complete
-
-- [x] Position-based copytrading
-- [x] Position rebalancing (±10% threshold)
-- [x] Exact leverage matching
-
-### Phase 2: Shadow Mode ✅ Complete
-
-- [x] Integrated prediction logging
-- [x] Paper trading validation
-- [x] Prediction stats monitoring
-- [x] Live data collection (candles, indicators, funding from copy trades)
-
-### Phase 3: Strategy Analysis & Prediction Refinement ✅ Complete
-
-- [x] Comprehensive target vault analysis (75 days, 20K+ fills)
-- [x] Identified strategy: Momentum/breakout accumulator
-- [x] Rewrote predictions with momentum signals (v2)
-- [x] Momentum-v2 prediction data collection
-
-### Phase 4: Independent Trading ✅ Complete
-
-- [x] IndependentTrader module (v1-v5 iterations)
-- [x] High-confidence signal filtering (score ≥ 90 LONG, ≥ 95 SHORT)
-- [x] Whitelist-based symbol selection (HYPE, SOL, VVV, ETH, MON, FARTCOIN)
-- [x] Target confirmation handling
-- [x] Conflict resolution with copy trading
-- [x] Indicator-based exit strategy (v5: BB, RSI, EMA signals)
-- [x] BTC macro regime detection (EMA50, EMA200, 7d change)
-- [x] Live market data collection (210 candles, full indicator suite)
-
-### Phase 5: Optimization & Scaling (Current)
-
-- [ ] Collect v5 performance data (indicator-based exits)
-- [ ] Validate macro regime accuracy
-- [ ] Increase independent allocation based on proven accuracy
-- [ ] Gradual transition from copy to autonomous
-- [ ] Full autonomy when Sharpe ≥ 1.5
+- [x] Validate v5.1/v6 performance with proper out-of-sample backtesting
+- [x] Stop-loss sensitivity study (-5% / -10% / -15%, + no-stop variant)
+- [x] Target vault behavioral analysis (lifecycle, sentiment correlation)
+- [x] Build sentiment panel (Archangel + Bitcoin MA hourly direction timeline)
+- [x] Symmetric longs/shorts in independent trading (MIN_SCORE_SHORT 95 → 90)
+- [x] Add third copy target (bd9c personal wallet)
+- [ ] Monitor live performance with third target
+- [ ] Revisit sentiment integration after more OOS data accumulates
+- [ ] Move toward Sharpe ≥ 1.5 target before increasing independent allocation further
 
 ---
 
 ## Changelog
 
-### 2026-03-31 - Independent Trading v5.1: Fix instant-close bug + hard stop adjustment
+### 2026-04-10 — Backtest framework, symmetric shorts, third copy target
 
-Analysis of 796 independent positions revealed 67% (533) were opened and immediately
-closed in the same cycle with 0% P&L due to contradictory entry/exit signals:
-- Entry: BB breakout (bbPosition > 1.0) scored +10 points → opened position
-- Exit: BB > 0.8 check fired immediately in managePositions() → closed at same price
+**Added:**
+- Full backtest engine (`scripts/ml/backtest/` + `run-backtest*.ts`) with in-sample/OOS support, pluggable scorers (v6, v7, v6_veto, v6_threshold), strategy variant persistence to `BacktestRun`/`BacktestTrade` tables.
+- Historical indicator backfill for Jan 1 – Mar 15 window on 16 core symbols (28K indicator rows).
+- Sentiment panel: hourly position state for Archangel + Bitcoin MA across the window, with rule-table direction predictor.
+- Third copy target: `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` (personal wallet, original "Not In Employment" vault leader).
 
-Hard stop was also too tight: -5% price move = -25% margin loss at 5x leverage.
-Target trader data (109 cycles): median loss -4.06%, avg loss -7.98%, 11% beyond -10%.
+**Changed:**
+- `MIN_SCORE_SHORT`: 95 → **90** (symmetric with longs). Shorts were effectively disabled by the asymmetric threshold; backtest showed enabling them improves P&L (-$287 → -$214 on the Jan-Mar window when expanded to 16 symbols; +$26 improvement on whitelist).
+- Fixed stale code comments: `IndependentTrader.ts` line 278 (`-5%` → `-10% configurable`), Prisma schema comment (`shorts disabled` → `long | short`).
+- Deleted old prediction model versions from DB (momentum-v2 189K rows, momentum-v3 61K rows, pattern-v1 24 rows). Only `momentum-v6` retained.
 
-- ✅ Skip BB > 0.8 exit when position entered on bb_breakout_above signal
-- ✅ 57% of BB upper exits (308/540) were contradicting their own entry signal
-- ✅ Changed hard stop from -5% to -10% (based on target's actual loss distribution)
-- ✅ Breakout entries expect price above band — exiting there defeats the strategy
-
-### 2026-03-15 - Prediction v5: BTC Macro Regime Detection
-
-Target shifted $1.8M long → $10.4M short when BTC dropped 24% ($92K→$70K).
-Added macro regime detector using BTC EMA50, EMA200, 7d change, MACD.
-
-- ✅ Bear regime: strong short bias (+10 score, +2 short signals)
-- ✅ Bull regime: strong long bias (+10 score, +2 long signals)
-- ✅ Tie-breaker flips from long→short in bear regime
-- ✅ Increased candle fetch from 60→210 for EMA200 computation
-
-### 2026-03-14 - Independent Trading v5: Indicator-Based Exits
-
-Analysis of 109 position cycles with candle-computed indicators showed
-no fixed TP/SL, discretionary exits correlated with BB/RSI/EMA signals.
-
-- ✅ LONG exits: BB > 0.8 (0% WR), RSI > 70 (30% WR), price < EMA9+21 (TP)
-- ✅ SHORT exits: BB 0.4-0.6 mean (83% WR), price < EMA9+21 (TP)
-- ✅ Safety nets: -5% hard stop, 72h max hold
-- ✅ Removed trailing stop, min hold, peak price tracking
-
-### 2026-03-14 - Live Market Data Collection + Prediction v4
-
-- ✅ Created MarketDataCollector (fetches candles, computes indicators)
-- ✅ MACD is #1 signal (91% accurate for shorts, weighted 2x)
-- ✅ RSI > 70 = LONG signal (breakout buyer, reversed from standard)
-- ✅ BB position scoring based on 454 matched indicator events
-- ✅ Symbol role awareness (always-long vs mostly-short)
-
-### 2026-03-09 - Independent Trading v4: Trailing Stop
-
-- ✅ Hold time: 4h → 12h min / 72h max with trailing stop
-- ✅ Trailing stop: 3% from peak after min hold
-- ✅ Hard stop: -5% from entry (always active)
-- ✅ Whitelist: HYPE, SOL, VVV, ETH, MON, FARTCOIN
-- ✅ Shorts allowed at very high confidence (score >= 95)
-
-### 2026-02-10 - Independent Trading v3 (Time-Based Exit)
-
-Analysis showed paper trading has 99% win rate with 4h hold, but live TP/SL had 27% win rate.
-Hypothesis: TP/SL triggers on volatility before the predicted move completes.
-
-- ✅ Switched to 4h fixed hold (no TP/SL)
-- ✅ Increased max allocation from 3% to 10% of vault
-- ✅ Removed IP from whitelist (poor live performance)
-- ✅ Added kPEPE and BERA to whitelist (100% paper win rate)
-- ✅ Reset historic data for clean v3 analysis
-- ✅ Will evaluate after 1 week of data collection
-
-### 2026-02-04 - Independent Trading Bug Fixes
-
-- ✅ Fixed prediction scope: now includes whitelist symbols for independent trading signals
-- ✅ Fixed sizing calculation: margin allocation now correctly multiplied by leverage for notional
-- ✅ Fixed leverage limits: IndependentTrader now uses shared metadata cache from CopyTradingManager
-- ✅ Increased copy trading scale multiplier from 20% to 30% (COPY_SCALE_MULTIPLIER=1.3)
-
-### 2026-02-03 - Independent Trading System
-
-- ✅ Added IndependentTrader module for autonomous trading
-- ✅ High-confidence signals only (score ≥ 80, LONG only)
-- ✅ Whitelist: VVV, AXS, IP, LDO, AAVE, XMR, GRASS, SKY, ZORA
-- ✅ TP/SL management (+8%/-4%) with 24h timeout
-- ✅ Target confirmation handling (hand off to copy trading)
-- ✅ Conflict resolution in CopyTradingManager
-- ✅ IndependentPosition database model
-- ✅ Monitoring script: `npm run ml:independent-stats`
-- ✅ Removed WebSocket monitoring (using polling only)
-
-### 2026-01-31 - Momentum Strategy v2
-
-- ✅ Comprehensive target vault strategy analysis (75 days, 20K+ fills)
-- ✅ Identified: Momentum/breakout accumulator strategy (not mean reversion)
-- ✅ Key findings: 65% breakout buys, 77% BTC correlation, session-based accumulation
-- ✅ Rewrote PredictionLogger with momentum-based signals (v2)
-- ✅ Extended validation window from 1h to 4h (matches target hold patterns)
-- ✅ Cleaned up old predictions (6,841 deleted, archived to AnalysisReport)
-- ✅ Added analysis scripts: strategy, deep, save-report, cleanup
-- ✅ Strategy report saved to DB for future reference
-
-### 2026-01-28 - Live Shadow Mode System
-
-- ✅ Integrated PredictionLogger into CopyTradingManager
-- ✅ Predictions run BEFORE each copy cycle
-- ✅ Paper trading validation with P&L tracking
-- ✅ Added `npm run ml:stats` for monitoring
-- ✅ Cleaned up historical data scripts (now collecting live)
-- ✅ Updated Prediction schema for paper trading
-
-### 2026-01-27 - Prediction Engine & Analysis
-
-- ✅ Created PredictionEngine with pattern-matching
-- ✅ Backtested on historical data (identified low precision)
-- ✅ Completed strategy analysis (statistical profile)
-
-### 2026-01-25 - Production Hardening
-
-- ✅ Position rebalancing (increase AND decrease)
-- ✅ Fixed resource leaks (HTTP client singleton)
-- ✅ Database connection pool configuration
-
-### 2026-01-24 - Phase 1 Launch
-
-- ✅ Position-based copytrading operational
-- ✅ Google Cloud SQL database
+**Key findings (didn't change strategy, but inform future work):**
+- **Target vault (`0x4cb5...`) analysis, corrected:** Only 93 real position events in 74 days (not 5,685 "trades" as TWAP aggregation suggested). Longs median hold ~2 days, shorts median hold 62 days. Longs lost $220K, shorts made $295K. BTC/ETH/SOL = 96% of P&L. Target held **one big short BTC conviction trade** for most of the window; only 1 direction flip.
+- **Target IS contrarian to Bitcoin MA** ~54% of the time. Archangel is mostly flat at target entries. Target shorts in EMA-bull regime (84%) and longs in EMA-bear regime (71%) — opposite of what v6 scoring assumes.
+- **Sentiment correlation is real but small.** v6 + sentiment threshold variant (+5/−5) improves OOS P&L from +$48 to +$84 and cuts drawdown (32% → 23%), but HURTS in-sample. Parameter sweep (±5 to ±25) shows no threshold value is robustly better than baseline across both windows.
+- **VVV dominance problem:** Ex-VVV, the strategy has no edge (-95% in-sample, +4.5% OOS). VVV rally +296% carries the whole whitelist. Changing whitelist to BTC/ETH/SOL made things worse (-$74/-$10) — the momentum/breakout scoring doesn't fit majors.
+- **Decision:** keep current live config (alt whitelist, v6 scoring, -10% hard stop, indicator exits, symmetric 90 thresholds). Main P&L driver is copy trading, independent trading is a side bet.
+- **bd9c (new 3rd target):** personal wallet, active multi-symbol discretionary trading ($1.3M notional in 48h across BTC/HYPE/ETH + xyz builder perps). Currently flat (round-trips his positions intraday). Adding as 3rd copy target — activates when he opens new main DEX positions.
 
 ---
 
-## Next Steps
-
-1. **Monitor** v5 indicator-based exits via `npm run ml:independent-stats`
-2. **Validate** macro regime detection accuracy (bear/bull calls)
-3. **Track** indicator exit reasons (BB/RSI/EMA) win rates
-4. **Evaluate** whether to increase independent allocation
-5. **Consider** shorter hold times to match target's scalping style (86% exits < 1h)
-
----
-
-**For detailed setup instructions, see README.md**
+**For setup instructions see `README.md`.**
