@@ -305,6 +305,24 @@ npm run docker-push
 
 ## Changelog
 
+### 2026-04-10 (afternoon) — Aggregation refactor: remove `numTargets` divisor
+
+Refactored `CopyTradingManager.aggregateTargetPositions` to fix the root cause of the rollout race incident. New formula:
+
+```
+ourMargin = abs(netMarginPct) × ourPortfolio × COPY_SCALE_MULTIPLIER
+```
+
+Previously the formula divided by `numTargets`, which made adding/removing a target instantly resize all existing positions and caused race-condition churn during Cloud Run revision rollouts.
+
+**New behavior** (with COPY_SCALE_MULTIPLIER=3.0):
+- 1 target with 10% margin in BTC long → we use 30% of our portfolio as margin
+- 2 targets each with 10% margin → we use 60% of ours (additive conviction)
+- 1 target long 10% + another short 5% on same symbol → net 5% long → we use 15%
+- **Adding a target with 0 exposure has zero effect on existing positions**
+
+**Position sizing impact:** This deploy doubles existing position sizes (since the old formula's effective scale was `3.0/2 = 1.5x` with 2 targets, vs the new `3.0x`). Intentional — accepting one churn cycle to gain a more aggressive sizing model and a safe foundation for adding more copy targets.
+
 ### 2026-04-10 — Deploy postmortem: Cloud Run rollout race
 
 When `gcloud run services update --update-env-vars` adds/removes a copy target, Cloud Run briefly runs the old + new revision concurrently during traffic shifting. The two revisions compute different target position sizes (because `aggregateTargetPositions` divides by `numTargets`) and execute conflicting actions on the same symbols within seconds.

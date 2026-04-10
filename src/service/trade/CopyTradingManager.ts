@@ -341,24 +341,33 @@ export class CopyTradingManager {
 
     /**
      * Aggregate desired positions across all copy targets into a single map.
-     * For each symbol, sums scaled sizes from all targets. If targets disagree
-     * on direction, the side with larger total notional wins.
      *
-     * Returns a Map<symbol, { side, size, leverage }> representing what our
-     * combined position should be. The scaleFactor is pre-baked into size,
-     * so syncPosition uses scaleFactor=1.0.
+     * For each symbol we sum each target's margin allocation as a percentage of
+     * THEIR portfolio (so targets with different sizes/leverages contribute
+     * proportional convictions). Long-side and short-side margin pcts accumulate
+     * separately, then net out — opposite directions cancel.
      *
-     * Also wraps results in an assetPositions-compatible format so syncPosition
-     * can consume it without changes.
+     * Sizing formula (independent of `numTargets` — adding a target with 0
+     * exposure has zero effect on existing positions):
+     *
+     *   ourMargin   = abs(netMarginPct) × ourPortfolio × COPY_SCALE_MULTIPLIER
+     *   ourNotional = ourMargin × winningSideLeverage
+     *   ourSize     = ourNotional / price
+     *
+     * Examples (COPY_SCALE_MULTIPLIER = 3.0):
+     *   1 target with 10% of their portfolio in BTC long → we use 30% of ours
+     *   2 targets each with 10% in BTC long → we use 60% of ours (additive conviction)
+     *   1 target long 10% + another short 5% on same symbol → net 5% long → we use 15%
+     *
+     * The previous formula divided by `numTargets`, which made adding/removing
+     * a target instantly resize all positions and caused churn during Cloud Run
+     * rollouts. The new formula is invariant to `numTargets` for unchanged signals.
      */
     private static aggregateTargetPositions(
         targets: { trader: `0x${string}`; portfolio: { portfolio: number; available: number }; positions: any }[],
         ourPortfolioValue: number,
         allMarkets: Record<string, string>
     ): Map<string, { side: string; size: number; leverage: number }> {
-        // Per-symbol: accumulate margin percentages (conviction) separately per side,
-        // then net by margin %. This ensures targets with different leverage but same
-        // margin allocation cancel out correctly.
         const symbolData = new Map<string, {
             longMarginPct: number; shortMarginPct: number;
             longLeverage: number; shortLeverage: number;
@@ -375,7 +384,7 @@ export class CopyTradingManager {
                 const price = Number(allMarkets[coin]);
                 if (!price) continue;
 
-                // Margin % = how much of the target's portfolio is allocated as margin
+                // Margin % = how much of THIS target's portfolio is allocated as margin
                 const notional = Math.abs(szi) * price;
                 const marginPct = notional / leverage / target.portfolio.portfolio;
 
@@ -391,9 +400,7 @@ export class CopyTradingManager {
             }
         }
 
-        // Resolve direction: net margin percentages, then convert to position size
-        // Net margin % → our margin $ → notional $ → asset size
-        // Use the winning side's leverage for execution
+        // Resolve direction: net long vs short margin pcts, then convert to position size.
         const result = new Map<string, { side: string; size: number; leverage: number }>();
         for (const [symbol, data] of symbolData) {
             const netMarginPct = data.longMarginPct - data.shortMarginPct;
@@ -404,8 +411,8 @@ export class CopyTradingManager {
             const price = Number(allMarkets[symbol]);
             if (!price || !leverage) continue;
 
-            // Scale net margin % to our portfolio: margin $ per target avg, then scale up
-            const ourMargin = Math.abs(netMarginPct) * (ourPortfolioValue / targets.length) * COPY_SCALE_MULTIPLIER;
+            // No /numTargets divisor — adding a target with 0 exposure has zero effect.
+            const ourMargin = Math.abs(netMarginPct) * ourPortfolioValue * COPY_SCALE_MULTIPLIER;
             const notional = ourMargin * leverage;
             const size = notional / price;
 
