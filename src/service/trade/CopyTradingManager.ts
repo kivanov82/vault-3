@@ -383,7 +383,8 @@ export class CopyTradingManager {
         type TargetContribution = {
             longMarginPct: number;   // sum over longs of (notional / leverage / targetPortfolio) × COPY_SCALE_MULTIPLIER
             shortMarginPct: number;
-            leverage: number;
+            longLeverage: number;    // max leverage across this target's long contributions
+            shortLeverage: number;   // max leverage across this target's short contributions
         };
         // perTarget[trader][symbol] = contribution
         const perTarget: Array<{ trader: string; contribs: Map<string, TargetContribution> }> = [];
@@ -410,13 +411,14 @@ export class CopyTradingManager {
                 // Translate into our-portfolio fraction via scale multiplier
                 const ourMarginPct = targetMarginPct * COPY_SCALE_MULTIPLIER;
 
-                const existing = contribs.get(coin) || { longMarginPct: 0, shortMarginPct: 0, leverage: 0 };
+                const existing = contribs.get(coin) || { longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0 };
                 if (side === 'long') {
                     existing.longMarginPct += ourMarginPct;
+                    existing.longLeverage = Math.max(existing.longLeverage, leverage);
                 } else {
                     existing.shortMarginPct += ourMarginPct;
+                    existing.shortLeverage = Math.max(existing.shortLeverage, leverage);
                 }
-                existing.leverage = Math.max(existing.leverage, leverage);
                 contribs.set(coin, existing);
             }
 
@@ -443,13 +445,18 @@ export class CopyTradingManager {
         }
 
         // Aggregate across targets: net long vs short margin pcts per symbol.
-        const symbolAgg = new Map<string, { longMarginPct: number; shortMarginPct: number; leverage: number }>();
+        // Track leverage separately per side — when net direction is short, we must use the
+        // max of short leverages (not long), otherwise a small opposite-side long at high
+        // leverage would inflate our notional.
+        type AggEntry = { longMarginPct: number; shortMarginPct: number; longLeverage: number; shortLeverage: number };
+        const symbolAgg = new Map<string, AggEntry>();
         for (const { contribs } of perTarget) {
             for (const [symbol, c] of contribs) {
-                const existing = symbolAgg.get(symbol) || { longMarginPct: 0, shortMarginPct: 0, leverage: 0 };
+                const existing = symbolAgg.get(symbol) || { longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0 };
                 existing.longMarginPct += c.longMarginPct;
                 existing.shortMarginPct += c.shortMarginPct;
-                existing.leverage = Math.max(existing.leverage, c.leverage);
+                existing.longLeverage = Math.max(existing.longLeverage, c.longLeverage);
+                existing.shortLeverage = Math.max(existing.shortLeverage, c.shortLeverage);
                 symbolAgg.set(symbol, existing);
             }
         }
@@ -461,7 +468,7 @@ export class CopyTradingManager {
             if (netMarginPct === 0) continue;
 
             const side = netMarginPct > 0 ? 'long' : 'short';
-            const leverage = data.leverage;
+            const leverage = side === 'long' ? data.longLeverage : data.shortLeverage;
             const price = Number(allMarkets[symbol]);
             if (!price || !leverage) continue;
 
