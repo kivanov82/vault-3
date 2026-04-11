@@ -28,6 +28,15 @@ const POSITION_ADJUST_THRESHOLD = parseFloat(process.env.POSITION_ADJUST_THRESHO
 // Scale multiplier for copy positions (3.0 = 3x larger than proportional)
 const COPY_SCALE_MULTIPLIER = parseFloat(process.env.COPY_SCALE_MULTIPLIER || '3.0');
 
+// Maximum fraction of our portfolio that a SINGLE target can demand as margin.
+// Without this cap, a diversified multi-symbol target (e.g. bd9c running 8 concurrent positions
+// each at ~10% of his portfolio) produces a per-target demand of ~0.8 × COPY_SCALE_MULTIPLIER,
+// which easily exceeds 100% of our portfolio on its own, leading to margin exhaustion and
+// repeated "Order has zero size" thrashing. When a target's aggregate demand exceeds the cap,
+// all of that target's per-symbol contributions are scaled down proportionally so relative
+// allocation within the target is preserved.
+const MAX_PORTFOLIO_UTILIZATION = parseFloat(process.env.MAX_PORTFOLIO_UTILIZATION || '0.7');
+
 // Track last scan time for latency calculation
 const tradeStartTimes = new Map<string, number>();
 
@@ -368,12 +377,22 @@ export class CopyTradingManager {
         ourPortfolioValue: number,
         allMarkets: Record<string, string>
     ): Map<string, { side: string; size: number; leverage: number }> {
-        const symbolData = new Map<string, {
-            longMarginPct: number; shortMarginPct: number;
-            longLeverage: number; shortLeverage: number;
-        }>();
+        // Per-target, per-symbol contribution. We compute each target's raw marginPct
+        // contributions independently so we can apply a per-target utilization cap before
+        // aggregating.
+        type TargetContribution = {
+            longMarginPct: number;   // sum over longs of (notional / leverage / targetPortfolio) × COPY_SCALE_MULTIPLIER
+            shortMarginPct: number;
+            leverage: number;
+        };
+        // perTarget[trader][symbol] = contribution
+        const perTarget: Array<{ trader: string; contribs: Map<string, TargetContribution> }> = [];
 
         for (const target of targets) {
+            const contribs = new Map<string, TargetContribution>();
+            let targetTotalDemand = 0; // sum of |long - short| contribs AFTER scaling, in units of our-portfolio fraction
+
+            // First: raw per-symbol margin pct (relative to OUR portfolio, already scaled by multiplier)
             for (const ap of target.positions.assetPositions) {
                 const coin = ap.position.coin;
                 const szi = Number(ap.position.szi);
@@ -384,35 +403,70 @@ export class CopyTradingManager {
                 const price = Number(allMarkets[coin]);
                 if (!price) continue;
 
-                // Margin % = how much of THIS target's portfolio is allocated as margin
+                // Fraction of target's portfolio allocated as margin for this position
                 const notional = Math.abs(szi) * price;
-                const marginPct = notional / leverage / target.portfolio.portfolio;
+                const targetMarginPct = notional / leverage / target.portfolio.portfolio;
 
-                const existing = symbolData.get(coin) || { longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0 };
+                // Translate into our-portfolio fraction via scale multiplier
+                const ourMarginPct = targetMarginPct * COPY_SCALE_MULTIPLIER;
+
+                const existing = contribs.get(coin) || { longMarginPct: 0, shortMarginPct: 0, leverage: 0 };
                 if (side === 'long') {
-                    existing.longMarginPct += marginPct;
-                    existing.longLeverage = Math.max(existing.longLeverage, leverage);
+                    existing.longMarginPct += ourMarginPct;
                 } else {
-                    existing.shortMarginPct += marginPct;
-                    existing.shortLeverage = Math.max(existing.shortLeverage, leverage);
+                    existing.shortMarginPct += ourMarginPct;
                 }
-                symbolData.set(coin, existing);
+                existing.leverage = Math.max(existing.leverage, leverage);
+                contribs.set(coin, existing);
+            }
+
+            // Per-target cap: total demanded margin from THIS target (sum of absolute
+            // net-per-symbol contributions) must not exceed MAX_PORTFOLIO_UTILIZATION of our
+            // portfolio. If it does, scale every contribution from this target proportionally.
+            for (const c of contribs.values()) {
+                targetTotalDemand += Math.abs(c.longMarginPct - c.shortMarginPct);
+            }
+
+            if (targetTotalDemand > MAX_PORTFOLIO_UTILIZATION) {
+                const scale = MAX_PORTFOLIO_UTILIZATION / targetTotalDemand;
+                for (const c of contribs.values()) {
+                    c.longMarginPct *= scale;
+                    c.shortMarginPct *= scale;
+                }
+                logger.info(
+                    `⚖️  Target ${target.trader.slice(0, 10)}: demand ${(targetTotalDemand * 100).toFixed(0)}% > cap ` +
+                    `${(MAX_PORTFOLIO_UTILIZATION * 100).toFixed(0)}%, scaling positions by ${(scale * 100).toFixed(0)}%`
+                );
+            }
+
+            perTarget.push({ trader: target.trader, contribs });
+        }
+
+        // Aggregate across targets: net long vs short margin pcts per symbol.
+        const symbolAgg = new Map<string, { longMarginPct: number; shortMarginPct: number; leverage: number }>();
+        for (const { contribs } of perTarget) {
+            for (const [symbol, c] of contribs) {
+                const existing = symbolAgg.get(symbol) || { longMarginPct: 0, shortMarginPct: 0, leverage: 0 };
+                existing.longMarginPct += c.longMarginPct;
+                existing.shortMarginPct += c.shortMarginPct;
+                existing.leverage = Math.max(existing.leverage, c.leverage);
+                symbolAgg.set(symbol, existing);
             }
         }
 
-        // Resolve direction: net long vs short margin pcts, then convert to position size.
+        // Resolve direction and convert to position size.
         const result = new Map<string, { side: string; size: number; leverage: number }>();
-        for (const [symbol, data] of symbolData) {
+        for (const [symbol, data] of symbolAgg) {
             const netMarginPct = data.longMarginPct - data.shortMarginPct;
             if (netMarginPct === 0) continue;
 
             const side = netMarginPct > 0 ? 'long' : 'short';
-            const leverage = side === 'long' ? data.longLeverage : data.shortLeverage;
+            const leverage = data.leverage;
             const price = Number(allMarkets[symbol]);
             if (!price || !leverage) continue;
 
-            // No /numTargets divisor — adding a target with 0 exposure has zero effect.
-            const ourMargin = Math.abs(netMarginPct) * ourPortfolioValue * COPY_SCALE_MULTIPLIER;
+            // netMarginPct is already in units of our-portfolio fraction and already scaled.
+            const ourMargin = Math.abs(netMarginPct) * ourPortfolioValue;
             const notional = ourMargin * leverage;
             const size = notional / price;
 

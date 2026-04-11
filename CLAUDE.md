@@ -46,7 +46,14 @@ All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` 
 - 25% independent trading
 - buffer from aggregation dilution when targets disagree
 
-Aggregation math: `ourMargin = netMarginPct × (ourPortfolio / numTargets) × COPY_SCALE_MULTIPLIER`. With 3 agreeing targets at 5% margin each, effective size is unchanged from 2 agreeing targets. When targets disagree, the net margin is reduced (diluted).
+Aggregation math (per target, then netted across targets):
+
+1. For each target position: `ourMarginPct_i = (positionNotional / leverage / targetPortfolio) × COPY_SCALE_MULTIPLIER` (expressed as fraction of **our** portfolio).
+2. **Per-target cap:** if a single target's `sum(|netOurMarginPct|)` across all its symbols exceeds `MAX_PORTFOLIO_UTILIZATION` (default 0.7), every contribution from that target is scaled down proportionally. Prevents a single diversified multi-symbol target from demanding more margin than we have.
+3. Aggregate across targets by netting long vs short contributions per symbol.
+4. `ourMargin = |longSum − shortSum| × ourPortfolio`, then `size = ourMargin × leverage / price`.
+
+No `/numTargets` divisor — adding a target with 0 exposure has zero effect on existing positions. With 2 targets each at 5% margin in BTC long, we use `(0.05 + 0.05) × 3.0 × ourPortfolio = 30%` of our portfolio as margin. When targets disagree, net margin is reduced (diluted).
 
 ### Copy trading
 - Mode: `scaled`, position-based
