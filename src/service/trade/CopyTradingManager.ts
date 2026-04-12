@@ -25,17 +25,23 @@ const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5
 // Position adjustment threshold (e.g., 0.1 = 10% difference triggers rebalance)
 const POSITION_ADJUST_THRESHOLD = parseFloat(process.env.POSITION_ADJUST_THRESHOLD || '0.1');
 
-// Scale multiplier for copy positions (3.0 = 3x larger than proportional)
-const COPY_SCALE_MULTIPLIER = parseFloat(process.env.COPY_SCALE_MULTIPLIER || '3.0');
+// Per-target scale multipliers, parallel to COPY_TRADERS.
+// e.g. COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0 → vault targets get 3x, personal wallet gets 1x.
+// Falls back to 3.0 for any target without an explicit entry.
+const COPY_SCALE_MULTIPLIERS: number[] = (process.env.COPY_SCALE_MULTIPLIERS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(s => parseFloat(s));
 
-// Maximum fraction of our portfolio that a SINGLE target can demand as margin.
-// Without this cap, a diversified multi-symbol target (e.g. bd9c running 8 concurrent positions
-// each at ~10% of his portfolio) produces a per-target demand of ~0.8 × COPY_SCALE_MULTIPLIER,
-// which easily exceeds 100% of our portfolio on its own, leading to margin exhaustion and
-// repeated "Order has zero size" thrashing. When a target's aggregate demand exceeds the cap,
-// all of that target's per-symbol contributions are scaled down proportionally so relative
-// allocation within the target is preserved.
-const MAX_PORTFOLIO_UTILIZATION = parseFloat(process.env.MAX_PORTFOLIO_UTILIZATION || '0.7');
+function getTargetMultiplier(targetIndex: number): number {
+    return COPY_SCALE_MULTIPLIERS[targetIndex] ?? 3.0;
+}
+
+// Max fraction of portfolio allocated to copy trading = 1 - independent allocation.
+// Independent defaults to 30% → copy cap defaults to 70%.
+const INDEPENDENT_MAX_ALLOCATION_PCT = parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.30');
+const MAX_COPY_ALLOCATION = 1.0 - INDEPENDENT_MAX_ALLOCATION_PCT;
 
 // Track last scan time for latency calculation
 const tradeStartTimes = new Map<string, number>();
@@ -372,107 +378,124 @@ export class CopyTradingManager {
      * a target instantly resize all positions and caused churn during Cloud Run
      * rollouts. The new formula is invariant to `numTargets` for unchanged signals.
      */
+    /**
+     * Priority-ordered budget allocation for copy trading positions.
+     *
+     * 1. Each target gets its own multiplier (COPY_SCALE_MULTIPLIERS, parallel to COPY_TRADERS).
+     * 2. Global budget = MAX_COPY_ALLOCATION (= 1 - independent allocation).
+     * 3. Targets processed in COPY_TRADERS order (first = highest priority).
+     *    First target's positions are fully satisfied before the next target starts.
+     * 4. Within each target, positions sorted by descending margin demand — biggest
+     *    conviction trades allocated first; small tail positions dropped if budget runs out.
+     * 5. Cross-target netting: opposite-side positions cancel and refund budget.
+     *
+     * Deterministic: same target state always produces the same position set.
+     */
     private static aggregateTargetPositions(
         targets: { trader: `0x${string}`; portfolio: { portfolio: number; available: number }; positions: any }[],
         ourPortfolioValue: number,
         allMarkets: Record<string, string>
     ): Map<string, { side: string; size: number; leverage: number }> {
-        // Per-target, per-symbol contribution. We compute each target's raw marginPct
-        // contributions independently so we can apply a per-target utilization cap before
-        // aggregating.
-        type TargetContribution = {
-            longMarginPct: number;   // sum over longs of (notional / leverage / targetPortfolio) × COPY_SCALE_MULTIPLIER
-            shortMarginPct: number;
-            longLeverage: number;    // max leverage across this target's long contributions
-            shortLeverage: number;   // max leverage across this target's short contributions
-        };
-        // perTarget[trader][symbol] = contribution
-        const perTarget: Array<{ trader: string; contribs: Map<string, TargetContribution> }> = [];
+
+        // ── Phase 1: compute raw demands per target, preserving COPY_TRADERS order ──
+        type SymbolDemand = { symbol: string; side: 'long' | 'short'; marginPct: number; leverage: number };
+        const targetDemands: Array<{ trader: string; demands: SymbolDemand[] }> = [];
 
         for (const target of targets) {
-            const contribs = new Map<string, TargetContribution>();
-            let targetTotalDemand = 0; // sum of |long - short| contribs AFTER scaling, in units of our-portfolio fraction
+            const traderIndex = COPY_TRADERS.indexOf(target.trader as `0x${string}`);
+            const multiplier = getTargetMultiplier(traderIndex >= 0 ? traderIndex : targets.indexOf(target));
+            const demands: SymbolDemand[] = [];
 
-            // First: raw per-symbol margin pct (relative to OUR portfolio, already scaled by multiplier)
             for (const ap of target.positions.assetPositions) {
                 const coin = ap.position.coin;
                 const szi = Number(ap.position.szi);
                 if (szi === 0) continue;
 
-                const side = HyperliquidConnector.positionSide(ap.position);
+                const side = HyperliquidConnector.positionSide(ap.position) as 'long' | 'short';
                 const leverage = ap.position.leverage?.value || 1;
                 const price = Number(allMarkets[coin]);
                 if (!price) continue;
 
-                // Fraction of target's portfolio allocated as margin for this position
                 const notional = Math.abs(szi) * price;
                 const targetMarginPct = notional / leverage / target.portfolio.portfolio;
+                const ourMarginPct = targetMarginPct * multiplier;
 
-                // Translate into our-portfolio fraction via scale multiplier
-                const ourMarginPct = targetMarginPct * COPY_SCALE_MULTIPLIER;
+                demands.push({ symbol: coin, side, marginPct: ourMarginPct, leverage });
+            }
 
-                const existing = contribs.get(coin) || { longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0 };
+            // Sort by descending margin demand — biggest positions allocated first
+            demands.sort((a, b) => b.marginPct - a.marginPct);
+            targetDemands.push({ trader: target.trader, demands });
+        }
+
+        // ── Phase 2: priority-ordered budget allocation ──
+        let remainingBudget = MAX_COPY_ALLOCATION;
+
+        type Alloc = { longMarginPct: number; shortMarginPct: number; longLeverage: number; shortLeverage: number };
+        const allocations = new Map<string, Alloc>();
+
+        for (const { trader, demands } of targetDemands) {
+            if (remainingBudget <= 0.001) {
+                logger.info(`⚖️  Target ${trader.slice(0, 10)}: budget exhausted, skipping`);
+                break;
+            }
+
+            let targetAllocated = 0;
+            let targetSkipped = 0;
+
+            for (const { symbol, side, marginPct, leverage } of demands) {
+                if (remainingBudget <= 0.001) {
+                    targetSkipped++;
+                    continue;
+                }
+
+                const allocated = Math.min(marginPct, remainingBudget);
+                remainingBudget -= allocated;
+                targetAllocated += allocated;
+
+                const existing = allocations.get(symbol) || {
+                    longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0,
+                };
+
                 if (side === 'long') {
-                    existing.longMarginPct += ourMarginPct;
+                    existing.longMarginPct += allocated;
                     existing.longLeverage = Math.max(existing.longLeverage, leverage);
                 } else {
-                    existing.shortMarginPct += ourMarginPct;
+                    existing.shortMarginPct += allocated;
                     existing.shortLeverage = Math.max(existing.shortLeverage, leverage);
                 }
-                contribs.set(coin, existing);
-            }
 
-            // Per-target cap: total demanded margin from THIS target (sum of absolute
-            // net-per-symbol contributions) must not exceed MAX_PORTFOLIO_UTILIZATION of our
-            // portfolio. If it does, scale every contribution from this target proportionally.
-            for (const c of contribs.values()) {
-                targetTotalDemand += Math.abs(c.longMarginPct - c.shortMarginPct);
-            }
-
-            if (targetTotalDemand > MAX_PORTFOLIO_UTILIZATION) {
-                const scale = MAX_PORTFOLIO_UTILIZATION / targetTotalDemand;
-                for (const c of contribs.values()) {
-                    c.longMarginPct *= scale;
-                    c.shortMarginPct *= scale;
+                // Netting: if both sides now have margin, they cancel
+                const netted = Math.min(existing.longMarginPct, existing.shortMarginPct);
+                if (netted > 0) {
+                    existing.longMarginPct -= netted;
+                    existing.shortMarginPct -= netted;
+                    remainingBudget += netted; // refund cancelled margin
+                    targetAllocated -= netted;
                 }
-                logger.info(
-                    `⚖️  Target ${target.trader.slice(0, 10)}: demand ${(targetTotalDemand * 100).toFixed(0)}% > cap ` +
-                    `${(MAX_PORTFOLIO_UTILIZATION * 100).toFixed(0)}%, scaling positions by ${(scale * 100).toFixed(0)}%`
-                );
+
+                allocations.set(symbol, existing);
             }
 
-            perTarget.push({ trader: target.trader, contribs });
+            logger.info(
+                `⚖️  Target ${trader.slice(0, 10)}: allocated ${(targetAllocated * 100).toFixed(1)}%` +
+                `${targetSkipped > 0 ? ` (${targetSkipped} positions skipped)` : ''}` +
+                ` | budget remaining: ${(remainingBudget * 100).toFixed(1)}%`
+            );
         }
 
-        // Aggregate across targets: net long vs short margin pcts per symbol.
-        // Track leverage separately per side — when net direction is short, we must use the
-        // max of short leverages (not long), otherwise a small opposite-side long at high
-        // leverage would inflate our notional.
-        type AggEntry = { longMarginPct: number; shortMarginPct: number; longLeverage: number; shortLeverage: number };
-        const symbolAgg = new Map<string, AggEntry>();
-        for (const { contribs } of perTarget) {
-            for (const [symbol, c] of contribs) {
-                const existing = symbolAgg.get(symbol) || { longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0 };
-                existing.longMarginPct += c.longMarginPct;
-                existing.shortMarginPct += c.shortMarginPct;
-                existing.longLeverage = Math.max(existing.longLeverage, c.longLeverage);
-                existing.shortLeverage = Math.max(existing.shortLeverage, c.shortLeverage);
-                symbolAgg.set(symbol, existing);
-            }
-        }
-
-        // Resolve direction and convert to position size.
+        // ── Phase 3: convert to sizes ──
         const result = new Map<string, { side: string; size: number; leverage: number }>();
-        for (const [symbol, data] of symbolAgg) {
+
+        for (const [symbol, data] of allocations) {
             const netMarginPct = data.longMarginPct - data.shortMarginPct;
-            if (netMarginPct === 0) continue;
+            if (Math.abs(netMarginPct) < 0.0001) continue;
 
             const side = netMarginPct > 0 ? 'long' : 'short';
             const leverage = side === 'long' ? data.longLeverage : data.shortLeverage;
             const price = Number(allMarkets[symbol]);
             if (!price || !leverage) continue;
 
-            // netMarginPct is already in units of our-portfolio fraction and already scaled.
             const ourMargin = Math.abs(netMarginPct) * ourPortfolioValue;
             const notional = ourMargin * leverage;
             const size = notional / price;

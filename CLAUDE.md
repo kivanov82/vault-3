@@ -41,23 +41,29 @@ Copy trading and independent trading share the same scan cycle, asset metadata c
 
 All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints. The bd9c personal wallet also trades on HL's `xyz` builder-code DEX (oil, BRENTOIL) — those positions are not currently copied (we only query the main perps DEX).
 
-### Portfolio split (conceptual budget; aggregation logic handles actual sizing)
-- ~25% per copy target × 3 targets
-- 25% independent trading
-- buffer from aggregation dilution when targets disagree
+### Portfolio split
+- **70% copy trading** (global cap = `1.0 - INDEPENDENT_MAX_ALLOCATION_PCT`)
+- **30% independent trading** (reserved, never consumed by copy positions)
 
-Aggregation math (per target, then netted across targets):
+### Aggregation: priority-ordered budget allocation
 
-1. For each target position: `ourMarginPct_i = (positionNotional / leverage / targetPortfolio) × COPY_SCALE_MULTIPLIER` (expressed as fraction of **our** portfolio).
-2. **Per-target cap:** if a single target's `sum(|netOurMarginPct|)` across all its symbols exceeds `MAX_PORTFOLIO_UTILIZATION` (default 0.7), every contribution from that target is scaled down proportionally. Prevents a single diversified multi-symbol target from demanding more margin than we have.
-3. Aggregate across targets by netting long vs short contributions per symbol.
-4. `ourMargin = |longSum − shortSum| × ourPortfolio`, then `size = ourMargin × leverage / price`.
+Deterministic algorithm — same target state always produces the same position set.
 
-No `/numTargets` divisor — adding a target with 0 exposure has zero effect on existing positions. With 2 targets each at 5% margin in BTC long, we use `(0.05 + 0.05) × 3.0 × ourPortfolio = 30%` of our portfolio as margin. When targets disagree, net margin is reduced (diluted).
+1. **Per-target multipliers** (`COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0`, parallel to COPY_TRADERS):
+   `ourMarginPct_i = (positionNotional / leverage / targetPortfolio) × multiplier_i`
+2. **Global budget:** `MAX_COPY_ALLOCATION = 1.0 - independentAllocation` (default 0.70).
+3. **Priority ordering:** targets processed in COPY_TRADERS order (first = highest priority).
+   First target's positions fully satisfied before second starts consuming budget.
+4. **Within-target ordering:** positions sorted by descending margin demand.
+   Biggest conviction trades allocated first; small tail positions dropped if budget exhausted.
+5. **Cross-target netting:** opposite-side positions cancel and refund budget.
+6. `ourMargin = allocatedMarginPct × ourPortfolio`, then `size = ourMargin × leverage / price`.
+
+No `/numTargets` divisor. Adding a target with 0 exposure has zero effect. Low-priority targets with many positions get whatever budget remains (tail positions may be dropped).
 
 ### Copy trading
 - Mode: `scaled`, position-based
-- Scale multiplier: **3.0** (targets use ~4–6% margin → we target ~12–18%)
+- Scale multipliers: **3.0, 3.0, 1.0** (per-target, parallel to COPY_TRADERS)
 - Leverage: exact 1:1 with target
 - Slippage: 1% for market orders
 - Scan interval: 5 minutes
@@ -83,7 +89,7 @@ ENABLE_INDEPENDENT_TRADING=true
 ENABLE_FUNDING_COLLECTION=true
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
-COPY_SCALE_MULTIPLIER=3.0
+COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0
 COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
 ```
 
@@ -310,6 +316,22 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-04-12 — Aggregation redesign: priority-ordered budget allocation
+
+Complete rewrite of `CopyTradingManager.aggregateTargetPositions`. Replaces the sum-and-cap model with deterministic priority-ordered budget allocation.
+
+**Changes:**
+- **Per-target multipliers** (`COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0`): vault targets (Bitcoin MA, Archangel) get 3x, bd9c personal wallet gets 1x. Replaces single `COPY_SCALE_MULTIPLIER`.
+- **Global exposure cap** (`MAX_COPY_ALLOCATION = 1.0 - INDEPENDENT_MAX_ALLOCATION_PCT`): total copy trading margin capped at 70% of portfolio (= 100% minus 30% independent allocation). Replaces per-target `MAX_PORTFOLIO_UTILIZATION` cap.
+- **Target priority ordering**: targets processed in COPY_TRADERS order. First target fully satisfied before second starts consuming budget. bd9c (lowest priority, 1x multiplier) gets remaining budget.
+- **Within-target ordering**: positions sorted by descending margin demand. Biggest positions allocated first; small tail positions dropped if budget runs out mid-target.
+- **Cross-target netting**: opposite-side positions cancel and refund budget.
+- **Deterministic**: same target state always produces same position set. No more "race for margin" oscillation.
+
+**Position sizing impact:** Bitcoin MA (~21% of budget at 3x) and Archangel (~1-2%) are fully satisfied first. bd9c gets up to ~47% budget but at 1x multiplier, so his actual demand is much smaller. No position can exceed the 70% global cap.
+
+---
 
 ### 2026-04-10 (afternoon) — Aggregation refactor: remove `numTargets` divisor
 
