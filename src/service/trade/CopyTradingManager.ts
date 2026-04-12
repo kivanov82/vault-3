@@ -22,8 +22,18 @@ const COPY_TRADERS: `0x${string}`[] = (process.env.COPY_TRADERS || '')
 // Minimal risk limit
 const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5');
 
-// Position adjustment threshold (e.g., 0.1 = 10% difference triggers rebalance)
-const POSITION_ADJUST_THRESHOLD = parseFloat(process.env.POSITION_ADJUST_THRESHOLD || '0.1');
+// Per-target adjustment thresholds, parallel to COPY_TRADERS.
+// e.g. COPY_ADJUST_THRESHOLDS=0.05,0.05,0.20 → vaults react at 5%, personal wallet at 20%.
+// Falls back to 0.10 for any target without an explicit entry.
+const COPY_ADJUST_THRESHOLDS: number[] = (process.env.COPY_ADJUST_THRESHOLDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(s => parseFloat(s));
+
+function getTargetThreshold(targetIndex: number): number {
+    return COPY_ADJUST_THRESHOLDS[targetIndex] ?? 0.10;
+}
 
 // Per-target scale multipliers, parallel to COPY_TRADERS.
 // e.g. COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0 → vault targets get 3x, personal wallet gets 1x.
@@ -395,7 +405,7 @@ export class CopyTradingManager {
         targets: { trader: `0x${string}`; portfolio: { portfolio: number; available: number }; positions: any }[],
         ourPortfolioValue: number,
         allMarkets: Record<string, string>
-    ): Map<string, { side: string; size: number; leverage: number }> {
+    ): Map<string, { side: string; size: number; leverage: number; adjustThreshold: number }> {
 
         // ── Phase 1: compute raw demands per target, preserving COPY_TRADERS order ──
         type SymbolDemand = { symbol: string; side: 'long' | 'short'; marginPct: number; leverage: number };
@@ -434,7 +444,11 @@ export class CopyTradingManager {
         type Alloc = { longMarginPct: number; shortMarginPct: number; longLeverage: number; shortLeverage: number };
         const allocations = new Map<string, Alloc>();
 
+        // Track which target contributed the most margin to each symbol (for per-symbol threshold)
+        const dominantContributor = new Map<string, { traderIndex: number; amount: number }>();
+
         for (const { trader, demands } of targetDemands) {
+            const traderIndex = COPY_TRADERS.indexOf(trader as `0x${string}`);
             if (remainingBudget <= 0.001) {
                 logger.info(`⚖️  Target ${trader.slice(0, 10)}: budget exhausted, skipping`);
                 break;
@@ -452,6 +466,12 @@ export class CopyTradingManager {
                 const allocated = Math.min(marginPct, remainingBudget);
                 remainingBudget -= allocated;
                 targetAllocated += allocated;
+
+                // Track dominant contributor for per-symbol adjust threshold
+                const prev = dominantContributor.get(symbol);
+                if (!prev || allocated > prev.amount) {
+                    dominantContributor.set(symbol, { traderIndex: traderIndex >= 0 ? traderIndex : 0, amount: allocated });
+                }
 
                 const existing = allocations.get(symbol) || {
                     longMarginPct: 0, shortMarginPct: 0, longLeverage: 0, shortLeverage: 0,
@@ -485,7 +505,7 @@ export class CopyTradingManager {
         }
 
         // ── Phase 3: convert to sizes ──
-        const result = new Map<string, { side: string; size: number; leverage: number }>();
+        const result = new Map<string, { side: string; size: number; leverage: number; adjustThreshold: number }>();
 
         for (const [symbol, data] of allocations) {
             const netMarginPct = data.longMarginPct - data.shortMarginPct;
@@ -500,7 +520,11 @@ export class CopyTradingManager {
             const notional = ourMargin * leverage;
             const size = notional / price;
 
-            result.set(symbol, { side, size, leverage });
+            // Per-symbol threshold from the target that contributed the most to this symbol
+            const dominant = dominantContributor.get(symbol);
+            const adjustThreshold = dominant ? getTargetThreshold(dominant.traderIndex) : 0.10;
+
+            result.set(symbol, { side, size, leverage, adjustThreshold });
         }
 
         return result;
@@ -516,7 +540,7 @@ export class CopyTradingManager {
         ticker: string,
         _scaleFactor: number,
         scanStartTime: number,
-        aggregatedPositions: Map<string, { side: string; size: number; leverage: number }>,
+        aggregatedPositions: Map<string, { side: string; size: number; leverage: number; adjustThreshold: number }>,
         ourPositions: any,
         allMarkets: Record<string, string>,
         tradedSymbols: Set<string>,
@@ -605,9 +629,10 @@ export class CopyTradingManager {
                 }
             }
 
-            // Check if size adjustment needed
+            // Check if size adjustment needed (per-symbol threshold from dominant target)
             const sizeDiff = Math.abs(ourSize - targetSizeForUs);
-            const sizeThreshold = targetSizeForUs * POSITION_ADJUST_THRESHOLD;
+            const adjustThreshold = desired?.adjustThreshold ?? 0.10;
+            const sizeThreshold = targetSizeForUs * adjustThreshold;
 
             if (sizeDiff > sizeThreshold) {
                 positionDelta.needsAction = true;
