@@ -454,17 +454,24 @@ export class CopyTradingManager {
                 break;
             }
 
+            // Total raw demand for this target (sum of all position marginPcts)
+            const targetTotalDemand = demands.reduce((sum, d) => sum + d.marginPct, 0);
+
+            // This target's budget = min(its total demand, remaining global budget)
+            const targetBudget = Math.min(targetTotalDemand, remainingBudget);
+
+            // Proportional scale: if demand exceeds budget, scale all positions equally.
+            // This prevents upstream position changes from cascading to downstream positions.
+            const proportionalScale = targetTotalDemand > 0.001
+                ? targetBudget / targetTotalDemand
+                : 0;
+
             let targetAllocated = 0;
-            let targetSkipped = 0;
 
             for (const { symbol, side, marginPct, leverage } of demands) {
-                if (remainingBudget <= 0.001) {
-                    targetSkipped++;
-                    continue;
-                }
+                const allocated = marginPct * proportionalScale;
+                if (allocated < 0.001) continue;
 
-                const allocated = Math.min(marginPct, remainingBudget);
-                remainingBudget -= allocated;
                 targetAllocated += allocated;
 
                 // Track dominant contributor for per-symbol adjust threshold
@@ -490,16 +497,17 @@ export class CopyTradingManager {
                 if (netted > 0) {
                     existing.longMarginPct -= netted;
                     existing.shortMarginPct -= netted;
-                    remainingBudget += netted; // refund cancelled margin
                     targetAllocated -= netted;
                 }
 
                 allocations.set(symbol, existing);
             }
 
+            remainingBudget -= targetAllocated;
+
             logger.info(
                 `⚖️  Target ${trader.slice(0, 10)}: allocated ${(targetAllocated * 100).toFixed(1)}%` +
-                `${targetSkipped > 0 ? ` (${targetSkipped} positions skipped)` : ''}` +
+                `${proportionalScale < 0.999 ? ` (scaled ${(proportionalScale * 100).toFixed(0)}%)` : ''}` +
                 ` | budget remaining: ${(remainingBudget * 100).toFixed(1)}%`
             );
         }
