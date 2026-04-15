@@ -136,6 +136,66 @@ interface MarketState {
   btcChange7d?: number | null;
   // Funding
   fundingRate?: number | null;
+  // Vault sentiment (live target BTC positions)
+  vaultSentiment?: {
+    bitcoinMa: 'long' | 'short' | 'flat';
+    archangel: 'long' | 'short' | 'flat';
+  } | null;
+}
+
+/**
+ * Vault sentiment — directional signal from Bitcoin MA + Archangel live BTC positions.
+ *
+ * Uses vault positions as smart-money directional conviction, combined with EMA regime.
+ * Agreement between vaults and EMA = high confidence. Disagreement = weaker/null signal.
+ */
+function sentimentRuleDirection(
+  emaRegime: 'bull' | 'bear' | 'neutral',
+  archangel: 'long' | 'short' | 'flat',
+  bitcoinMa: 'long' | 'short' | 'flat'
+): 'long_strong' | 'long' | 'short_strong' | 'short' | null {
+  const vaultLongs = (archangel === 'long' ? 1 : 0) + (bitcoinMa === 'long' ? 1 : 0);
+  const vaultShorts = (archangel === 'short' ? 1 : 0) + (bitcoinMa === 'short' ? 1 : 0);
+
+  // Both vaults agree on direction — strong signal regardless of EMA
+  if (vaultLongs === 2) return 'long_strong';
+  if (vaultShorts === 2) return 'short_strong';
+
+  // One vault has a direction, other is flat — use it, boost if EMA agrees
+  if (vaultLongs === 1 && vaultShorts === 0) {
+    return emaRegime === 'bull' ? 'long_strong' : 'long';
+  }
+  if (vaultShorts === 1 && vaultLongs === 0) {
+    return emaRegime === 'bear' ? 'short_strong' : 'short';
+  }
+
+  // Vaults disagree (one long, one short) — no clear signal
+  if (vaultLongs > 0 && vaultShorts > 0) return null;
+
+  // Both flat — no vault signal
+  return null;
+}
+
+/**
+ * Contrarian sentiment — treats vault positions as predictors of target behavior,
+ * not as directional signals. Targets historically go opposite to EMA regime.
+ *
+ * From Jan 1 – Mar 15 correlation analysis:
+ *   Bull EMA + Archangel long → SHORT (7% target long rate, target contrarian in bull)
+ *   Bear EMA + Archangel short → LONG (71% target long rate, target contrarian in bear)
+ *   Consensus both long → LONG (98% target long rate, rare near-oracle)
+ */
+function sentimentRuleContrarian(
+  emaRegime: 'bull' | 'bear' | 'neutral',
+  archangel: 'long' | 'short' | 'flat',
+  bitcoinMa: 'long' | 'short' | 'flat'
+): 'long_strong' | 'long' | 'short' | null {
+  if (archangel === 'long' && bitcoinMa === 'long') return 'long_strong';
+  if (emaRegime === 'bull') return 'short';
+  if (emaRegime === 'bear' && archangel === 'short') return 'long';
+  if (emaRegime === 'neutral' && archangel === 'long') return 'long';
+  if (emaRegime === 'neutral' && archangel === 'short') return 'short';
+  return null;
 }
 
 /**
@@ -278,18 +338,20 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
   }
 
   // === 7. BTC MACRO REGIME DETECTION ===
-  // Target shifted entire portfolio to short when BTC dropped 24% ($92K → $70K).
-  // They flip based on BTC macro trend, not just short-term moves.
+  // Two-layer regime: (1) BTC EMA regime from technicals, (2) vault sentiment from
+  // Bitcoin MA + Archangel live BTC positions. The vaults are contrarian to EMA regime
+  // (short in bull, long in bear), so vault sentiment overrides pure EMA signals.
   //
-  // Regime logic:
-  // - BTC below EMA50 AND EMA200 = bear regime → strong short bias
-  // - BTC below EMA50 only = weakening → mild short bias
-  // - BTC above EMA50 AND EMA200 = bull regime → long bias
-  // - BTC 7-day change < -5% = active selloff → short bias
-  // - BTC MACD bearish = confirming downtrend
+  // From Jan 1 – Mar 15 correlation analysis (1753 hours, 5546 target trades):
+  //   Consensus both long       → LONG (strong) — 98% target long rate
+  //   Bull EMA + Archangel long → SHORT — target is contrarian in bull regime
+  //   Bear EMA + Archangel short→ LONG  — target is contrarian in bear regime
+  //   Neutral + Archangel long  → LONG  — 96% target long rate
+  //   Neutral + Archangel short → SHORT (weak)
 
-  let macroRegime: 'bull' | 'bear' | 'neutral' = 'neutral';
-  let regimeSignals = 0; // negative = bearish, positive = bullish
+  // Step 1: Compute BTC EMA regime from technicals
+  let emaRegime: 'bull' | 'bear' | 'neutral' = 'neutral';
+  let regimeSignals = 0;
 
   if (state.btcPrice && state.btcEma50) {
     if (state.btcPrice < state.btcEma50) {
@@ -320,7 +382,7 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
 
   if (state.btcChange7d !== null && state.btcChange7d !== undefined) {
     if (state.btcChange7d < -5) {
-      regimeSignals -= 2; // Strong bearish signal
+      regimeSignals -= 2;
       reasons.push('btc_weekly_dump');
     } else if (state.btcChange7d > 5) {
       regimeSignals += 2;
@@ -331,31 +393,78 @@ function scorePrediction(symbol: string, state: MarketState): { score: number; d
   if (state.btcRsi14 !== null && state.btcRsi14 !== undefined) {
     if (state.btcRsi14 < 30) {
       reasons.push('btc_oversold');
-      // Oversold can mean bounce → slight long signal
       regimeSignals++;
     } else if (state.btcRsi14 > 70) {
       reasons.push('btc_overbought');
     }
   }
 
-  // Determine regime
-  if (regimeSignals <= -2) {
-    macroRegime = 'bear';
-    // Bear regime: strong short bias across all assets
-    // Target went from $1.8M long → $10.4M short in 1 week during bear regime
-    score += 10;
-    shortSignals += 2;
-    reasons.push('macro_bear_regime');
-  } else if (regimeSignals >= 2) {
-    macroRegime = 'bull';
-    score += 10;
-    longSignals += 2;
-    reasons.push('macro_bull_regime');
+  if (regimeSignals <= -2) emaRegime = 'bear';
+  else if (regimeSignals >= 2) emaRegime = 'bull';
+
+  // Step 2: Combine EMA regime with vault sentiment
+  const sentiment = state.vaultSentiment;
+  let macroRegime: 'bull' | 'bear' | 'neutral' = 'neutral';
+
+  if (sentiment) {
+    // Active model: directional (vault position = our direction)
+    const sentimentDir = sentimentRuleDirection(emaRegime, sentiment.archangel, sentiment.bitcoinMa);
+    // Shadow model: contrarian (vault position predicts target behavior, not our direction)
+    const contrarianDir = sentimentRuleContrarian(emaRegime, sentiment.archangel, sentiment.bitcoinMa);
+    reasons.push(`vault_btcma_${sentiment.bitcoinMa}`, `vault_archangel_${sentiment.archangel}`);
+    if (contrarianDir) reasons.push(`contrarian_alt_${contrarianDir}`);
+
+    if (sentimentDir === 'long_strong') {
+      macroRegime = 'bull';
+      score += 10;
+      longSignals += 2;
+      reasons.push('sentiment_long_strong');
+    } else if (sentimentDir === 'long') {
+      macroRegime = 'bull';
+      score += 5;
+      longSignals += 1;
+      reasons.push('sentiment_long');
+    } else if (sentimentDir === 'short_strong') {
+      macroRegime = 'bear';
+      score += 10;
+      shortSignals += 2;
+      reasons.push('sentiment_short_strong');
+    } else if (sentimentDir === 'short') {
+      macroRegime = 'bear';
+      score += 5;
+      shortSignals += 1;
+      reasons.push('sentiment_short');
+    } else {
+      // No clear sentiment signal — fall back to EMA regime only
+      macroRegime = emaRegime;
+      if (emaRegime === 'bear') {
+        score += 5;
+        shortSignals += 1;
+        reasons.push('macro_bear_regime');
+      } else if (emaRegime === 'bull') {
+        score += 5;
+        longSignals += 1;
+        reasons.push('macro_bull_regime');
+      } else {
+        score -= 5;
+        reasons.push('macro_neutral_regime');
+      }
+    }
   } else {
-    // v6: Neutral regime is the WORST for trading (-0.19% avg P&L)
-    // Reduce score to discourage entries during unclear macro conditions
-    score -= 5;
-    reasons.push('macro_neutral_regime');
+    // No vault data available — fall back to pure EMA regime (original v6 logic)
+    macroRegime = emaRegime;
+    if (emaRegime === 'bear') {
+      score += 10;
+      shortSignals += 2;
+      reasons.push('macro_bear_regime');
+    } else if (emaRegime === 'bull') {
+      score += 10;
+      longSignals += 2;
+      reasons.push('macro_bull_regime');
+    } else {
+      score -= 5;
+      reasons.push('macro_neutral_regime');
+    }
   }
 
   // Short-term BTC momentum (in addition to macro regime)
@@ -484,7 +593,8 @@ export class PredictionLogger {
    */
   static async logPredictions(
     symbols: string[],
-    marketPrices: Record<string, string>
+    marketPrices: Record<string, string>,
+    activeTargets?: { trader: string; positions: any }[]
   ): Promise<void> {
     currentScanPredictions.clear();
     const timestamp = new Date();
@@ -535,6 +645,30 @@ export class PredictionLogger {
     const btcChange7d = btcCandles7d.length >= 168
       ? ((btcCandles7d[0].close - btcCandles7d[167].close) / btcCandles7d[167].close) * 100
       : null;
+
+    // Extract vault sentiment: BTC position direction from Bitcoin MA + Archangel
+    const BITCOIN_MA_ADDR = '0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768';
+    const ARCHANGEL_ADDR = '0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0';
+
+    let vaultSentiment: MarketState['vaultSentiment'] = null;
+    if (activeTargets && activeTargets.length > 0) {
+      const getBtcDirection = (trader: string): 'long' | 'short' | 'flat' => {
+        const target = activeTargets.find(t => t.trader.toLowerCase() === trader.toLowerCase());
+        if (!target?.positions?.assetPositions) return 'flat';
+        const btcPos = target.positions.assetPositions.find(
+          (ap: any) => ap.position.coin === 'BTC' && ap.position.szi !== '0'
+        );
+        if (!btcPos) return 'flat';
+        return Number(btcPos.position.szi) > 0 ? 'long' : 'short';
+      };
+
+      vaultSentiment = {
+        bitcoinMa: getBtcDirection(BITCOIN_MA_ADDR),
+        archangel: getBtcDirection(ARCHANGEL_ADDR),
+      };
+
+      logger.info(`🏛️  Vault sentiment: Bitcoin MA=${vaultSentiment.bitcoinMa}, Archangel=${vaultSentiment.archangel}`);
+    }
 
     for (const symbol of symbols) {
       try {
@@ -600,6 +734,7 @@ export class PredictionLogger {
           btcMacdHist,
           btcChange7d,
           fundingRate: funding?.rate ?? null,
+          vaultSentiment,
         };
 
         // Score prediction

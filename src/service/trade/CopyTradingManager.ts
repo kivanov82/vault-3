@@ -274,7 +274,7 @@ export class CopyTradingManager {
 
             // Run predictions BEFORE copy actions (shadow mode)
             try {
-                await PredictionLogger.logPredictions(allSymbols, allMarkets);
+                await PredictionLogger.logPredictions(allSymbols, allMarkets, activeTargets);
             } catch (predError: any) {
                 logger.error(`Prediction logging failed: ${predError.message}`);
             }

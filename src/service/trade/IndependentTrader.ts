@@ -173,6 +173,10 @@ export class IndependentTrader {
 
         // Calculate position size (equal allocation per position)
         const remainingAllocation = maxAllocationUsd - currentAllocation;
+        if (remainingAllocation <= 0) {
+          logger.warn(`⚠️  Independent allocation exhausted ($${currentAllocation.toFixed(0)}/$${maxAllocationUsd.toFixed(0)} used), skipping remaining signals`);
+          break;
+        }
         const positionsRemaining = CONFIG.MAX_POSITIONS - openIndependent.length;
         const positionSizeUsd = Math.min(
           remainingAllocation / positionsRemaining,
