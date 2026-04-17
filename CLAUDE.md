@@ -221,33 +221,43 @@ src/
 │       ├── logger.ts
 │       └── indicators.ts               # rsi, macd, bb, ema, atr, stoch, adx, williams, obv
 
-scripts/ml/
-├── backtest/                           # Backtest engine (strategy.ts + engine.ts + sentiment.ts)
-│   ├── strategy.ts                     # v6 + v7 scoring functions, exit logic
-│   ├── engine.ts                       # Backtest runner with pluggable scorers
-│   └── sentiment.ts                    # Sentiment panel builder + rule table
-├── run-backtest.ts                     # Run strategy variants and persist to BacktestRun
-├── run-backtest-oos.ts                 # Out-of-sample validation runner
-├── run-threshold-sweep.ts              # Sentiment threshold parameter sweep
-├── run-majors-sentiment-test.ts        # Test sentiment on BTC/ETH/SOL whitelist
-├── run-no-vvv-test.ts                  # Ex-VVV sanity check
-├── backfill-indicators.ts              # Compute & persist historical indicators
-├── backfill-sentiment-fills.ts         # Fetch Archangel + Bitcoin MA historical fills
-├── backfill-higher-tf-candles.ts       # Fetch 4h + 1d candles
-├── backfill-oos-data.ts                # Combined OOS data backfill
-├── sentiment-correlation.ts            # Sentiment vs target correlation analysis
-├── target-lifecycle-v2.ts              # Target position lifecycle (NEW/ADD/REDUCE/CLOSE/FLIP)
-├── position-state-correlation.ts       # Position state (not fill) correlation with sentiment
-├── target-behavior.ts                  # Target entry signature analysis
-├── compute-baselines.ts                # Target P&L + buy-and-hold baselines
-├── weekly-independent-analysis.ts      # Past N-day independent trading performance
-├── independent-stats.ts                # All-time independent trading stats
-├── prediction-stats.ts                 # Prediction scoring stats
-├── run-predictions.ts                  # Manual prediction test
-├── strategy-analysis.ts                # Target strategy analysis
-├── deep-strategy-analysis.ts           # Deep behavioral analysis
-├── historical-trade-analysis.ts        # Historical trade analysis
-└── cleanup-predictions.ts              # Archive old predictions
+scripts/
+├── check-recent.ts                     # Recent copy-trading activity (last 7d)
+└── ml/
+    ├── backtest/                       # Backtest engine (strategy + engine + sentiment)
+    │   ├── strategy.ts                 # v6 + v7 scoring functions, exit logic
+    │   ├── engine.ts                   # Backtest runner with pluggable scorers
+    │   └── sentiment.ts                # Sentiment panel builder + rule table
+    │
+    │   # Backtest runners
+    ├── run-backtest.ts                 # In-sample strategy variants → BacktestRun
+    ├── run-backtest-oos.ts             # Out-of-sample validation runner
+    ├── run-threshold-sweep.ts          # Sentiment threshold parameter sweep
+    ├── run-majors-sentiment-test.ts    # Test sentiment on BTC/ETH/SOL whitelist
+    ├── run-no-vvv-test.ts              # Ex-VVV sanity check
+    │
+    │   # Data backfills (one-shot, reusable)
+    ├── backfill-indicators.ts          # Compute & persist historical indicators
+    ├── backfill-sentiment-fills.ts     # Archangel + Bitcoin MA historical fills
+    ├── backfill-higher-tf-candles.ts   # 4h + 1d candles
+    ├── backfill-oos-data.ts            # Combined OOS data backfill
+    │
+    │   # Historical study of legacy target 0x4cb5 (Jan–Mar 2026 window)
+    ├── target-behavior.ts              # Target entry signature analysis
+    ├── target-lifecycle-v2.ts          # Position lifecycle (NEW/ADD/REDUCE/CLOSE/FLIP)
+    ├── target-deep-analysis.ts         # Deep fill analysis (ml:target-analysis)
+    ├── historical-trade-analysis.ts    # Position-cycle extraction (ml:historical)
+    ├── sentiment-correlation.ts        # Sentiment vs target correlation
+    ├── position-state-correlation.ts   # Position-state correlation with sentiment
+    ├── compute-baselines.ts            # Target P&L + buy-and-hold baselines
+    │
+    │   # Live monitoring
+    ├── weekly-independent-analysis.ts  # Past N-day independent trading performance
+    ├── independent-stats.ts            # All-time independent stats (ml:independent-stats)
+    ├── prediction-stats.ts             # Prediction scoring stats (ml:stats)
+    ├── sentiment-ab.ts                 # Directional vs contrarian sentiment A/B (ml:sentiment-ab)
+    ├── reconcile-pnl.ts                # Reconcile independent P&L vs HL fills (ml:reconcile)
+    └── cleanup-predictions.ts          # Archive old predictions (ml:cleanup)
 ```
 
 ---
@@ -267,11 +277,13 @@ npx prisma db push                        # Push schema changes
 # Monitoring
 npm run ml:stats                          # Prediction performance (momentum-v6)
 npm run ml:independent-stats              # All-time independent stats
-npx tsx scripts/ml/weekly-independent-analysis.ts   # Past N days
+npm run ml:sentiment-ab -- 10             # Directional vs contrarian sentiment A/B (N days)
+npx tsx scripts/ml/weekly-independent-analysis.ts   # Past N days independent
+npx tsx scripts/check-recent.ts                     # Recent copy actions (last 7d)
 
-# Analysis
-npm run ml:strategy                       # Target strategy analysis
-npm run ml:deep                           # Deep behavioral analysis
+# Historical target study (legacy 0x4cb5 vault, Jan–Mar 2026 window)
+npm run ml:historical                     # Position-cycle extraction + rule mining
+npm run ml:target-analysis                # Deep fill analysis
 
 # Backtest (local analysis — uses in-DB historical candles/indicators/fills)
 npx tsx scripts/ml/backfill-indicators.ts      # (one-off) Compute historical indicators
