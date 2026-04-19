@@ -128,6 +128,9 @@ export class CopyTradingManager {
     }
 
     private static loggedConfigs = new Set<string>();
+    // Dedup noisy warns: log once until the state flips back.
+    private static insufficientMarginSymbols = new Set<string>();
+
     private static hasLoggedConfig(symbol: string): boolean {
         if (this.loggedConfigs.has(symbol)) {
             return true;
@@ -447,10 +450,13 @@ export class CopyTradingManager {
         // Track which target contributed the most margin to each symbol (for per-symbol threshold)
         const dominantContributor = new Map<string, { traderIndex: number; amount: number }>();
 
+        // Accumulate per-target allocation summaries for a single consolidated log line.
+        const allocSummaries: string[] = [];
+
         for (const { trader, demands } of targetDemands) {
             const traderIndex = COPY_TRADERS.indexOf(trader as `0x${string}`);
             if (remainingBudget <= 0.001) {
-                logger.info(`⚖️  Target ${trader.slice(0, 10)}: budget exhausted, skipping`);
+                allocSummaries.push(`${trader.slice(0, 10)}=exhausted`);
                 break;
             }
 
@@ -505,12 +511,11 @@ export class CopyTradingManager {
 
             remainingBudget -= targetAllocated;
 
-            logger.info(
-                `⚖️  Target ${trader.slice(0, 10)}: allocated ${(targetAllocated * 100).toFixed(1)}%` +
-                `${proportionalScale < 0.999 ? ` (scaled ${(proportionalScale * 100).toFixed(0)}%)` : ''}` +
-                ` | budget remaining: ${(remainingBudget * 100).toFixed(1)}%`
-            );
+            const scaleTag = proportionalScale < 0.999 ? `(${(proportionalScale * 100).toFixed(0)}%)` : '';
+            allocSummaries.push(`${trader.slice(0, 10)}=${(targetAllocated * 100).toFixed(1)}%${scaleTag}`);
         }
+
+        logger.info(`⚖️  Allocated: ${allocSummaries.join(', ')} | remaining: ${(remainingBudget * 100).toFixed(1)}%`);
 
         // ── Phase 3: convert to sizes ──
         const result = new Map<string, { side: string; size: number; leverage: number; adjustThreshold: number }>();
@@ -713,11 +718,13 @@ export class CopyTradingManager {
                 const requiredMarginWithBuffer = requiredMargin * 1.2;
 
                 if (requiredMarginWithBuffer > ourPortfolio.available) {
-                    logger.warn(`⚠️  ${symbol}: Need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)}`);
+                    if (!this.insufficientMarginSymbols.has(symbol)) {
+                        logger.warn(`⚠️  ${symbol}: Need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)}`);
+                        this.insufficientMarginSymbols.add(symbol);
+                    }
                     return;
                 }
-            } else if (action !== 'close' && action !== 'flip') {
-                logger.info(`💰 ${symbol}: Position value $${positionValueUSD.toFixed(2)}, Leverage ${targetLeverage}x`);
+                this.insufficientMarginSymbols.delete(symbol);
             }
 
             // Execute the action (pass market price to avoid additional API calls)

@@ -109,6 +109,13 @@ export class HyperliquidConnector {
             logger.warn(`⚠️  ${ticker.syn}: Capping size from ${size.toFixed(ticker.szDecimals)} to ${actualSize.toFixed(ticker.szDecimals)} (available margin: $${portfolio.available.toFixed(2)})`);
         }
 
+        // Skip if capped size is below exchange minimum — prevents "Order has zero size" rejections
+        // when available margin is $0 (fully deployed) or too small to meet the $10 min.
+        if (actualSize * market < 10) {
+            logger.warn(`⏸️  ${ticker.syn}: Skipping order — capped size $${(actualSize * market).toFixed(2)} < $10 exchange minimum (available: $${portfolio.available.toFixed(2)})`);
+            return;
+        }
+
         // Place market order for instant fill with 2% slippage (increased from 1% to handle thin orderbooks)
         const orderInstantPrice = long ? (market * 1.02) : (market * 0.98);
         const orderInstantPriceString = orderInstantPrice.toFixed(priceDecimals).toString();

@@ -573,6 +573,8 @@ function calculatePricePosition(candles: { close: number; high: number; low: num
 }
 
 export class PredictionLogger {
+  private static lastLoggedVaultSentiment: string | null = null;
+
   /**
    * Get current scan predictions for IndependentTrader
    */
@@ -667,7 +669,11 @@ export class PredictionLogger {
         archangel: getBtcDirection(ARCHANGEL_ADDR),
       };
 
-      logger.info(`🏛️  Vault sentiment: Bitcoin MA=${vaultSentiment.bitcoinMa}, Archangel=${vaultSentiment.archangel}`);
+      const sentimentKey = `${vaultSentiment.bitcoinMa}/${vaultSentiment.archangel}`;
+      if (sentimentKey !== this.lastLoggedVaultSentiment) {
+        logger.info(`🏛️  Vault sentiment: Bitcoin MA=${vaultSentiment.bitcoinMa}, Archangel=${vaultSentiment.archangel}`);
+        this.lastLoggedVaultSentiment = sentimentKey;
+      }
     }
 
     for (const symbol of symbols) {

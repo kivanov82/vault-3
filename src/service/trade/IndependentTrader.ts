@@ -76,6 +76,10 @@ const CONFIG = {
 };
 
 export class IndependentTrader {
+  // Dedup state for noisy per-scan warnings: log once per state change, not every 5 min.
+  private static lastSkipExitKey = new Map<string, string>();         // symbol → "dir:reason"
+  private static lastInsufficientMarginKey = new Set<string>();       // symbols currently logged
+
   /**
    * Check if independent trading is enabled
    */
@@ -192,9 +196,13 @@ export class IndependentTrader {
         // Check if we have enough margin
         const marginRequired = positionSizeUsd / CONFIG.LEVERAGE;
         if (marginRequired > portfolio.available * 0.95) {
-          logger.warn(`⚠️  ${pred.symbol}: Insufficient margin for independent position`);
+          if (!this.lastInsufficientMarginKey.has(pred.symbol)) {
+            logger.warn(`⚠️  ${pred.symbol}: Insufficient margin for independent position`);
+            this.lastInsufficientMarginKey.add(pred.symbol);
+          }
           break;
         }
+        this.lastInsufficientMarginKey.delete(pred.symbol);
 
         // Pre-check: don't open if any indicator exit would fire immediately
         const indicators = await this.getLatestIndicators(pred.symbol);
@@ -203,9 +211,14 @@ export class IndependentTrader {
           const price = Number(allMarkets[pred.symbol]);
           const exitSignal = this.checkIndicatorExit(dir, price, indicators);
           if (exitSignal) {
-            logger.info(`⏭️  ${pred.symbol}: Skipping ${dir.toUpperCase()} — exit "${exitSignal}" already active`);
+            const key = `${dir}:${exitSignal}`;
+            if (this.lastSkipExitKey.get(pred.symbol) !== key) {
+              logger.info(`⏭️  ${pred.symbol}: Skipping ${dir.toUpperCase()} — exit "${exitSignal}" already active`);
+              this.lastSkipExitKey.set(pred.symbol, key);
+            }
             continue;
           }
+          this.lastSkipExitKey.delete(pred.symbol);
         }
 
         // Open the position
