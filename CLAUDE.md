@@ -90,6 +90,8 @@ ENABLE_FUNDING_COLLECTION=true
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
 COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0
+COPY_ADJUST_THRESHOLDS=0.10,0.10,0.20
+MIN_ADJUSTMENT_VALUE_USD=20
 COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
 ```
 
@@ -303,8 +305,8 @@ npm run docker-push
 
 ## Risk Management
 
-- Minimum margin: $5 USD
-- Minimum position value: $10 USD (exchange requirement)
+- Minimum adjustment/open notional: `MIN_ADJUSTMENT_VALUE_USD` (default $10, live $20). Gates full notional on open and delta notional on adjust — suppresses dust churn above the $10 exchange hard minimum.
+- Per-target adjust thresholds: `COPY_ADJUST_THRESHOLDS` (live `0.10,0.10,0.20` — bd9c wider to ignore intraday rotation). Each symbol inherits the threshold of whichever target contributes the most margin to it.
 - Slippage control: 1% for market orders
 - Database health: auto-reconnect on failures
 - Global error handlers prevent crashes

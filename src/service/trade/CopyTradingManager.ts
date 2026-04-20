@@ -19,8 +19,10 @@ const COPY_TRADERS: `0x${string}`[] = (process.env.COPY_TRADERS || '')
     .map(s => s.trim())
     .filter(s => s.length > 0) as `0x${string}`[];
 
-// Minimal risk limit
-const MIN_POSITION_SIZE_USD = parseFloat(process.env.MIN_POSITION_SIZE_USD || '5');
+// Smallest dollar amount of position change worth executing.
+// Applies to full-notional on open and delta-notional on adjust.
+// Exchange hard minimum is $10; set higher to suppress dust churn.
+const MIN_ADJUSTMENT_VALUE_USD = parseFloat(process.env.MIN_ADJUSTMENT_VALUE_USD || '10');
 
 // Per-target adjustment thresholds, parallel to COPY_TRADERS.
 // e.g. COPY_ADJUST_THRESHOLDS=0.05,0.05,0.20 → vaults react at 5%, personal wallet at 20%.
@@ -694,21 +696,12 @@ export class CopyTradingManager {
                 return;
             }
             const positionValueUSD = targetSizeForUs * market;
-            const marginRequired = positionValueUSD / targetLeverage;
 
-            // Check minimum requirements (skip for close - always allow closing positions)
-            const EXCHANGE_MIN_POSITION_VALUE = 10;
-
-            if (action !== 'close') {
-                if (marginRequired < MIN_POSITION_SIZE_USD) {
-                    logger.warn(`⚠️  ${symbol}: Margin $${marginRequired.toFixed(2)} < $${MIN_POSITION_SIZE_USD} minimum`);
-                    return;
-                }
-
-                if (positionValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
-                    logger.warn(`⚠️  ${symbol}: Position $${positionValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum`);
-                    return;
-                }
+            // On open, require the full target notional to clear the floor.
+            // Adjust has its own delta-notional check further below.
+            if (action === 'open' && positionValueUSD < MIN_ADJUSTMENT_VALUE_USD) {
+                logger.warn(`⚠️  ${symbol}: Position $${positionValueUSD.toFixed(2)} < $${MIN_ADJUSTMENT_VALUE_USD} minimum`);
+                return;
             }
 
             // Check if we have enough margin for open actions (skip for flip - closing frees margin first)
@@ -782,11 +775,9 @@ export class CopyTradingManager {
                     const sizePercent = (sizeDelta / ourSize) * 100;
                     const adjustmentValueUSD = Math.abs(sizeDelta) * market;
 
-                    // Check if adjustment is below exchange minimum ($10)
-                    if (adjustmentValueUSD < EXCHANGE_MIN_POSITION_VALUE) {
-                        // Adjustment too small - skip and keep current position (within threshold tolerance)
-                        logger.warn(`⏸️  ${symbol}: Adjustment $${adjustmentValueUSD.toFixed(2)} < $${EXCHANGE_MIN_POSITION_VALUE} minimum, skipping (keeping current position)`);
-                        return; // Don't adjust, don't close - just keep as-is to avoid open-close loop
+                    if (adjustmentValueUSD < MIN_ADJUSTMENT_VALUE_USD) {
+                        logger.warn(`⏸️  ${symbol}: Adjustment $${adjustmentValueUSD.toFixed(2)} < $${MIN_ADJUSTMENT_VALUE_USD} minimum, skipping`);
+                        return;
                     }
 
                     if (sizeDelta > 0) {
