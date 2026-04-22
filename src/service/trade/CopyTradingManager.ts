@@ -71,6 +71,18 @@ let isScanRunning = false;
 let lastScanStartTime = 0;
 const SCAN_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes max per scan
 
+// Cache last successful portfolio+positions per target. When a fetch fails
+// transiently (HL RPC blip), we fall back to cached state instead of silently
+// dropping the target — aggregating without a high-weight target can invert
+// net direction and cause flip churn (see 2026-04-22 BTC incident).
+type TargetSnapshot = {
+    portfolio: { portfolio: number; available: number };
+    positions: any;
+    fetchedAt: number;
+};
+const lastKnownTargetState = new Map<string, TargetSnapshot>();
+const TARGET_STATE_TTL_MS = 15 * 60 * 1000; // 3 scan cycles
+
 export class CopyTradingManager {
 
     /**
@@ -225,6 +237,7 @@ export class CopyTradingManager {
                 portfolio: { portfolio: number; available: number };
                 positions: any;
             }[] = [];
+            const missingTargets: string[] = [];
             for (const trader of COPY_TRADERS) {
                 try {
                     const [portfolio, positions] = await Promise.all([
@@ -232,14 +245,30 @@ export class CopyTradingManager {
                         HyperliquidConnector.getOpenPositions(trader),
                     ]);
                     activeTargets.push({ trader, portfolio, positions });
+                    lastKnownTargetState.set(trader, { portfolio, positions, fetchedAt: Date.now() });
                 } catch (e: any) {
-                    logger.error(`❌ Failed to fetch target ${trader.slice(0, 10)}...: ${e.message}`);
+                    const cached = lastKnownTargetState.get(trader);
+                    const cacheAge = cached ? Date.now() - cached.fetchedAt : Infinity;
+                    if (cached && cacheAge < TARGET_STATE_TTL_MS) {
+                        logger.warn(`⚠️  Target ${trader.slice(0, 10)} fetch failed (${e.message}); using cache from ${(cacheAge / 60000).toFixed(1)}min ago`);
+                        activeTargets.push({ trader, portfolio: cached.portfolio, positions: cached.positions });
+                    } else {
+                        const cacheNote = cached ? ` (cache too stale: ${(cacheAge / 60000).toFixed(1)}min)` : ' (no cache)';
+                        logger.error(`❌ Failed to fetch target ${trader.slice(0, 10)}...: ${e.message}${cacheNote}`);
+                        missingTargets.push(trader);
+                    }
                 }
             }
 
             if (activeTargets.length === 0 && COPY_TRADERS.length > 0) {
                 logger.error(`❌ All copy targets unreachable, skipping copy trading`);
             }
+
+            // If any target lacks a usable snapshot, aggregation would run on an
+            // incomplete target set and can invert net direction. Skip trade
+            // actions for this cycle; still collect data, log predictions, and
+            // manage existing independent positions (hard stops, exits).
+            const incompleteTargetState = missingTargets.length > 0;
 
             // Aggregate desired positions across ALL targets
             // For each symbol: sum scaled sizes from all targets that hold it
@@ -287,9 +316,13 @@ export class CopyTradingManager {
             // Independent trading: process signals and manage positions
             // Pass combined target positions so conflicts with ANY target are detected
             // Copy trading always takes precedence — IndependentTrader checks for conflicts
+            // When target state is incomplete, skip opening new positions (conflict
+            // set is unreliable) but still manage existing ones so hard stops fire.
             if (IndependentTrader.isEnabled()) {
                 try {
-                    await IndependentTrader.processSignals(allMarkets, combinedTargetPositions);
+                    if (!incompleteTargetState) {
+                        await IndependentTrader.processSignals(allMarkets, combinedTargetPositions);
+                    }
                     await IndependentTrader.managePositions(allMarkets, combinedTargetPositions);
                 } catch (indepError: any) {
                     logger.error(`Independent trading error: ${indepError.message}`);
@@ -305,7 +338,13 @@ export class CopyTradingManager {
             const tradedSymbols = new Set<string>();
 
             // Sync positions using aggregated targets (one pass per symbol)
-            const symbolsToSync = [...new Set([...aggregatedPositions.keys(), ...ourSymbols])];
+            // Skip when target state is incomplete to avoid direction inversion.
+            if (incompleteTargetState) {
+                logger.error(`❌ Skipping copy-sync this cycle: ${missingTargets.length}/${COPY_TRADERS.length} target(s) unreachable with no fresh cache`);
+            }
+            const symbolsToSync = incompleteTargetState
+                ? []
+                : [...new Set([...aggregatedPositions.keys(), ...ourSymbols])];
             const BATCH_SIZE = 5;
             for (let i = 0; i < symbolsToSync.length; i += BATCH_SIZE) {
                 const batch = symbolsToSync.slice(i, i + BATCH_SIZE);
