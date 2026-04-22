@@ -734,10 +734,6 @@ export class CopyTradingManager {
                 logger.error(`❌ ${symbol}: No market price available`);
                 return;
             }
-            // Size to actually open — may be scaled down below if our free margin
-            // can't cover the full target. Future scans adjust-up via the normal
-            // same-direction delta path as other positions wind down and free margin.
-            let sizeToOpen = targetSizeForUs;
             const positionValueUSD = targetSizeForUs * market;
 
             // On open, require the full target notional to clear the floor.
@@ -747,24 +743,20 @@ export class CopyTradingManager {
                 return;
             }
 
-            // Check if we have enough margin for open actions (skip for flip - closing frees margin first)
+            // Check if we have enough margin for open actions (skip for flip - closing frees margin first).
+            // All-or-nothing: if we can't afford the full target size, skip entirely. Previously
+            // attempted a partial-open fallback but it created a creep-toward-70%-cap loop where
+            // every scan nudged the position up with a small adjust, burning fees on each step.
             if (action === 'open') {
                 const ourPortfolio = await HyperliquidConnector.getPortfolio(WALLET);
                 const requiredMarginWithBuffer = (positionValueUSD / targetLeverage) * 1.2;
 
                 if (requiredMarginWithBuffer > ourPortfolio.available) {
-                    const affordableNotional = (ourPortfolio.available / 1.2) * targetLeverage;
-
-                    if (affordableNotional < MIN_ADJUSTMENT_VALUE_USD) {
-                        if (!this.insufficientMarginSymbols.has(symbol)) {
-                            logger.warn(`⚠️  ${symbol}: Partial open $${affordableNotional.toFixed(2)} < $${MIN_ADJUSTMENT_VALUE_USD} min (need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)})`);
-                            this.insufficientMarginSymbols.add(symbol);
-                        }
-                        return;
+                    if (!this.insufficientMarginSymbols.has(symbol)) {
+                        logger.warn(`⚠️  ${symbol}: doesn't fit (need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)})`);
+                        this.insufficientMarginSymbols.add(symbol);
                     }
-
-                    sizeToOpen = affordableNotional / market;
-                    logger.warn(`⚠️  ${symbol}: Partial open ${((sizeToOpen / targetSizeForUs) * 100).toFixed(0)}% of target ($${affordableNotional.toFixed(0)} notional; have $${ourPortfolio.available.toFixed(2)} of $${requiredMarginWithBuffer.toFixed(2)} needed)`);
+                    return;
                 }
                 this.insufficientMarginSymbols.delete(symbol);
             }
@@ -782,12 +774,12 @@ export class CopyTradingManager {
                 }
 
                 case 'open': {
-                    const openResult = await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeToOpen, targetLeverage, false, market);
+                    const openResult = await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, targetSizeForUs, targetLeverage, false, market);
                     const openFillPrice = HyperliquidConnector.getFillPrice(openResult) ?? market;
-                    logger.info(`✅ ${symbol}: OPEN ${targetSide} ${sizeToOpen.toFixed(4)} @ ${targetLeverage}x fill $${openFillPrice.toFixed(2)}`);
-                    await this.logCopyTrade(symbol, 'open', targetSide, sizeToOpen, openFillPrice, targetLeverage, scanStartTime);
+                    logger.info(`✅ ${symbol}: OPEN ${targetSide} ${targetSizeForUs.toFixed(4)} @ ${targetLeverage}x fill $${openFillPrice.toFixed(2)}`);
+                    await this.logCopyTrade(symbol, 'open', targetSide, targetSizeForUs, openFillPrice, targetLeverage, scanStartTime);
                     tradedSymbols.add(symbol);
-                    await PredictionLogger.logCopyAction(symbol, 'open', targetSide, sizeToOpen);
+                    await PredictionLogger.logCopyAction(symbol, 'open', targetSide, targetSizeForUs);
                     break;
                 }
 

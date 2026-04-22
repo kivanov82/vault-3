@@ -335,9 +335,8 @@ npm run docker-push
 
 Three fixes deployed together (investigation triggered when Archangel opened long PUMP at 20:10:40 UTC and we didn't copy it).
 
-**Partial open on insufficient margin** (`CopyTradingManager.executePositionSync`):
-- Previously: open was all-or-nothing. If `(positionNotional/leverage) × 1.2 > available`, skip entirely — so big target positions (like Archangel's PUMP scaling to ~30% of our vault) were silently missed when free margin was tied up in other copy positions.
-- Now: scale the open down to whatever we can afford (`affordableNotional = (available / 1.2) × leverage`), only bail if affordable drops below `MIN_ADJUSTMENT_VALUE_USD`. Future scans adjust-up through the normal same-direction delta path as other positions wind down. Flip path unchanged.
+**Open margin check — kept all-or-nothing** (`CopyTradingManager.executePositionSync`):
+- Tried a partial-open variant earlier in the day (`f2e7062`) that scaled the open to whatever margin we could afford. Reverted same day: once we held a partial position, every subsequent scan saw a huge `targetSize - ourSize` gap above the 10% adjust threshold and fired another adjust-up, creeping toward the 70% cap scan-by-scan and burning market-order fees on each step. Simpler rule wins: if the full target doesn't fit, skip and wait — if another target closes later, margin frees and the next scan opens in one shot. Log message is `⚠️ SYM: doesn't fit (need $X, have $Y)`.
 
 **Independent allocation bug — was effectively notional-capped** (`IndependentTrader.getCurrentAllocation`):
 - `sizeUsd` in the `IndependentPosition` row stores **notional** (`marginUsd × leverage`). `getCurrentAllocation` summed `sizeUsd` directly, while `maxAllocationUsd = portfolio × 0.30` is intended to cap **margin** (mirrors copy trading's 70% margin budget).
