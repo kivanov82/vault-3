@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot
 
 **Project Status:** Phase 5 — Optimization & Scaling
-**Last Updated:** 2026-04-22
+**Last Updated:** 2026-04-23
 
 A multi-target copytrading bot for Hyperliquid with an integrated autonomous trading module that runs alongside copy trading.
 
@@ -331,9 +331,9 @@ npm run docker-push
 
 ## Changelog
 
-### 2026-04-22 — Partial open, margin-based indep allocation, logger cleanup
+### 2026-04-22 — Margin-handling fixes across copy + independent paths
 
-Three fixes deployed together (investigation triggered when Archangel opened long PUMP at 20:10:40 UTC and we didn't copy it).
+Series of fixes landing in revisions `00074` → `00077`, triggered when Archangel opened long PUMP at 20:10:40 UTC and we didn't copy it. Four distinct bugs surfaced during the investigation.
 
 **All-or-nothing on both open and adjust-up** (`CopyTradingManager.executePositionSync`):
 - Tried a partial-open variant earlier in the day (`f2e7062`) that scaled the open to whatever margin we could afford. Reverted same day: once we held a partial position, every subsequent scan saw a huge `targetSize - ourSize` gap above the 10% adjust threshold and fired another adjust-up, creeping toward the 70% cap scan-by-scan and burning market-order fees on each step. Simpler rule wins: if the full target doesn't fit, skip and wait — if another target closes later, margin frees and the next scan opens in one shot. Log message is `⚠️ SYM: doesn't fit (need $X, have $Y)`.
