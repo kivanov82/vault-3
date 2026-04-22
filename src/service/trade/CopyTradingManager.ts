@@ -822,6 +822,20 @@ export class CopyTradingManager {
                     }
 
                     if (sizeDelta > 0) {
+                        // Same all-or-nothing rule as 'open': if we can't fund the size-up,
+                        // skip rather than letting openCopyPosition silently cap to zero
+                        // and log a phantom success.
+                        const ourPortfolio = await HyperliquidConnector.getPortfolio(WALLET);
+                        const requiredMarginWithBuffer = (adjustmentValueUSD / targetLeverage) * 1.2;
+                        if (requiredMarginWithBuffer > ourPortfolio.available) {
+                            if (!this.insufficientMarginSymbols.has(symbol)) {
+                                logger.warn(`⚠️  ${symbol}: adjust-up doesn't fit (need $${requiredMarginWithBuffer.toFixed(2)}, have $${ourPortfolio.available.toFixed(2)})`);
+                                this.insufficientMarginSymbols.add(symbol);
+                            }
+                            return;
+                        }
+                        this.insufficientMarginSymbols.delete(symbol);
+
                         await HyperliquidConnector.openCopyPosition(tickerConfig, isLong, sizeDelta, targetLeverage, true, market);
                         logger.info(`✅ ${symbol}: ADJUST +${Math.abs(sizePercent).toFixed(0)}% (${ourSize.toFixed(4)}→${targetSizeForUs.toFixed(4)})`);
                         await this.logCopyTrade(symbol, 'increase', targetSide, sizeDelta, market, targetLeverage, scanStartTime);

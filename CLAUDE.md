@@ -335,8 +335,9 @@ npm run docker-push
 
 Three fixes deployed together (investigation triggered when Archangel opened long PUMP at 20:10:40 UTC and we didn't copy it).
 
-**Open margin check — kept all-or-nothing** (`CopyTradingManager.executePositionSync`):
+**All-or-nothing on both open and adjust-up** (`CopyTradingManager.executePositionSync`):
 - Tried a partial-open variant earlier in the day (`f2e7062`) that scaled the open to whatever margin we could afford. Reverted same day: once we held a partial position, every subsequent scan saw a huge `targetSize - ourSize` gap above the 10% adjust threshold and fired another adjust-up, creeping toward the 70% cap scan-by-scan and burning market-order fees on each step. Simpler rule wins: if the full target doesn't fit, skip and wait — if another target closes later, margin frees and the next scan opens in one shot. Log message is `⚠️ SYM: doesn't fit (need $X, have $Y)`.
+- Also added the same margin guard to the **adjust-up** branch. Without it, `HyperliquidConnector.openCopyPosition` silently caps the size to 0 when available margin is $0 and returns without ordering, while `executePositionSync` logs a phantom `✅ SYM: ADJUST +X%` and writes a fake `Trade` row. Observed in production: PUMP stuck at partial size with every scan logging adjust-up successes that never happened. Adjust-down stays always-allowed (it frees margin).
 
 **Independent allocation bug — was effectively notional-capped** (`IndependentTrader.getCurrentAllocation`):
 - `sizeUsd` in the `IndependentPosition` row stores **notional** (`marginUsd × leverage`). `getCurrentAllocation` summed `sizeUsd` directly, while `maxAllocationUsd = portfolio × 0.30` is intended to cap **margin** (mirrors copy trading's 70% margin budget).
