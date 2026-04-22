@@ -193,9 +193,9 @@ export class IndependentTrader {
           continue;
         }
 
-        // Check if we have enough margin
-        const marginRequired = positionSizeUsd / CONFIG.LEVERAGE;
-        if (marginRequired > portfolio.available * 0.95) {
+        // positionSizeUsd is already the margin to commit (openPosition multiplies
+        // it by leverage to derive notional). Check free margin directly.
+        if (positionSizeUsd > portfolio.available * 0.95) {
           if (!this.lastInsufficientMarginKey.has(pred.symbol)) {
             logger.warn(`⚠️  ${pred.symbol}: Insufficient margin for independent position`);
             this.lastInsufficientMarginKey.add(pred.symbol);
@@ -586,14 +586,17 @@ export class IndependentTrader {
   }
 
   /**
-   * Get current total allocation in USD for independent positions
+   * Current total margin committed to independent positions.
+   * sizeUsd is notional; divide by per-position leverage to get margin,
+   * which is what MAX_ALLOCATION_PCT caps (matches copy trading's budget
+   * semantics — both measured in margin, not notional).
    */
   static async getCurrentAllocation(): Promise<number> {
     const openPositions = await prisma.independentPosition.findMany({
       where: { status: { in: ['open', 'confirmed'] } },
     });
 
-    return openPositions.reduce((sum, p) => sum + p.sizeUsd, 0);
+    return openPositions.reduce((sum, p) => sum + p.sizeUsd / p.leverage, 0);
   }
 
   /**

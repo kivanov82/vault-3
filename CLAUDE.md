@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot
 
 **Project Status:** Phase 5 — Optimization & Scaling
-**Last Updated:** 2026-04-10
+**Last Updated:** 2026-04-22
 
 A multi-target copytrading bot for Hyperliquid with an integrated autonomous trading module that runs alongside copy trading.
 
@@ -330,6 +330,24 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-04-22 — Partial open, margin-based indep allocation, logger cleanup
+
+Three fixes deployed together (investigation triggered when Archangel opened long PUMP at 20:10:40 UTC and we didn't copy it).
+
+**Partial open on insufficient margin** (`CopyTradingManager.executePositionSync`):
+- Previously: open was all-or-nothing. If `(positionNotional/leverage) × 1.2 > available`, skip entirely — so big target positions (like Archangel's PUMP scaling to ~30% of our vault) were silently missed when free margin was tied up in other copy positions.
+- Now: scale the open down to whatever we can afford (`affordableNotional = (available / 1.2) × leverage`), only bail if affordable drops below `MIN_ADJUSTMENT_VALUE_USD`. Future scans adjust-up through the normal same-direction delta path as other positions wind down. Flip path unchanged.
+
+**Independent allocation bug — was effectively notional-capped** (`IndependentTrader.getCurrentAllocation`):
+- `sizeUsd` in the `IndependentPosition` row stores **notional** (`marginUsd × leverage`). `getCurrentAllocation` summed `sizeUsd` directly, while `maxAllocationUsd = portfolio × 0.30` is intended to cap **margin** (mirrors copy trading's 70% margin budget).
+- Effect: with 5x leverage the true margin cap was ~6% of portfolio, not 30%. A single $70-margin FARTCOIN position ($350 notional) exhausted the "budget" and blocked all further independent signals.
+- Fix: sum `sizeUsd / leverage` so the comparison is margin vs margin. Also fixed an inconsistency at the pre-open margin check (line 197) — `positionSizeUsd` is already margin, no need to divide by leverage again.
+
+**Logger timestamp noise** (`logger.ts`, `Vault3.ts`):
+- Removed the `[ISO-timestamp]` prefix — Cloud Run already captures `timestamp` as a separate structured field, so the inline one was duplicate. Logs now start with `LEVEL message…`.
+
+---
 
 ### 2026-04-12 — Aggregation redesign: priority-ordered budget allocation
 

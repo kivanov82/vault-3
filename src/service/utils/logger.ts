@@ -4,12 +4,8 @@
 
 type Level = "info" | "warn" | "error" | "debug";
 
-function ts() {
-    return new Date().toISOString();
-}
-
 function base(level: Level, msg: string, ctx?: Record<string, any>) {
-    const line = `[${ts()}] ${level.toUpperCase()} ${msg}`;
+    const line = `${level.toUpperCase()} ${msg}`;
     if (ctx && Object.keys(ctx).length) {
         // keep the machine-readable tail consistent: json={...}
         // do not include functions/undefined

@@ -54,7 +54,7 @@ export class Vault3 {
             schedule.scheduleJob(`0 */${COPY_POLL_INTERVAL_MINUTES} * * * *`, async () => {
                 const scanTimeout = (COPY_POLL_INTERVAL_MINUTES - 1) * 60 * 1000; // Leave 1 minute buffer
                 try {
-                    console.log(`⏰ [${new Date().toISOString()}] Running scheduled position scan...`);
+                    console.log(`⏰ Running scheduled position scan...`);
 
                     // Add timeout wrapper to prevent scan from running longer than the interval
                     await Promise.race([
