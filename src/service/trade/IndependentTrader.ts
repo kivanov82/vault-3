@@ -71,8 +71,9 @@ const CONFIG = {
   MIN_SCORE_LONG: 90,
   MIN_SCORE_SHORT: 90,
 
-  // Whitelist: proven performers from target vault cycle analysis
-  WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'MON', 'FARTCOIN'],
+  // Whitelist: proven performers from target vault cycle analysis.
+  // MON removed 2026-06-04 — 155 trades / 90d, 46% win, -$78 net (high churn, no edge).
+  WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'FARTCOIN'],
 };
 
 export class IndependentTrader {

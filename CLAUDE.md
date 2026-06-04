@@ -81,7 +81,7 @@ No `/numTargets` divisor. Adding a target with 0 exposure has zero effect. Low-p
 | Hard stop | **-10%** from entry (price move, not margin) |
 | Min score (LONG) | 90 |
 | Min score (SHORT) | 90 (symmetric with long) |
-| Whitelist | HYPE, SOL, VVV, ETH, MON, FARTCOIN |
+| Whitelist | HYPE, SOL, VVV, ETH, FARTCOIN (MON removed 2026-06-04) |
 | Scoring model | `momentum-v6` |
 
 ### Live environment variables (Cloud Run)
@@ -336,6 +336,10 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-06-04 — Remove MON from independent whitelist
+
+`IndependentTrader.CONFIG.WHITELIST` is now `HYPE, SOL, VVV, ETH, FARTCOIN` (was + MON). 90-day independent stats: MON had 155 closed trades at 46% win rate for **−$78** net — highest churn of any symbol, no edge. Whitelist governs independent entries only; copy trading of MON (if a target holds it) is unaffected. No open MON independent position at removal time.
 
 ### 2026-06-04 — Adjust dead-band (BTC netting churn fix)
 
