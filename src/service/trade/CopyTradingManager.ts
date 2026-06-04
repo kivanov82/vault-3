@@ -50,10 +50,36 @@ function getTargetMultiplier(targetIndex: number): number {
     return COPY_SCALE_MULTIPLIERS[targetIndex] ?? 3.0;
 }
 
+// Per-target hard cap on combined raw demand (as fraction of our portfolio),
+// parallel to COPY_TRADERS. Applied AFTER multiplier, BEFORE global budget allocation.
+// Bounds exposure for targets with volatile TVL (e.g. personal wallets that withdraw/deposit).
+// e.g. COPY_MAX_TARGET_DEMAND_PCT=1.0,1.0,0.15 → vault targets uncapped, bd9c capped at 15%.
+// Falls back to 1.0 (100%, effectively uncapped vs the 70% global cap).
+const COPY_MAX_TARGET_DEMAND_PCT: number[] = (process.env.COPY_MAX_TARGET_DEMAND_PCT || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(s => parseFloat(s));
+
+function getTargetMaxDemand(targetIndex: number): number {
+    return COPY_MAX_TARGET_DEMAND_PCT[targetIndex] ?? 1.0;
+}
+
 // Max fraction of portfolio allocated to copy trading = 1 - independent allocation.
 // Independent defaults to 30% → copy cap defaults to 70%.
 const INDEPENDENT_MAX_ALLOCATION_PCT = parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.30');
 const MAX_COPY_ALLOCATION = 1.0 - INDEPENDENT_MAX_ALLOCATION_PCT;
+
+// Absolute adjust dead-band as a fraction of OUR portfolio (margin terms). An adjust
+// only fires when the margin delta exceeds BOTH the per-symbol % threshold AND this
+// floor. Defends against churn on heavily-netted symbols: when a large conviction
+// position from one target is nearly cancelled by an opposing target (e.g. two vaults
+// short BTC vs bd9c long BTC), the traded position is the small noisy *residual* of two
+// big legs. Scan-to-scan wobble in either leg trips the % threshold every cycle and
+// burns market-order fees. This floor ignores adjustments smaller than ~1.5% of
+// portfolio margin so we don't chase that noise. For large, un-netted positions the %
+// threshold stays the binding constraint, so tracking fidelity is unchanged there.
+const COPY_ADJUST_MIN_NET_PCT = parseFloat(process.env.COPY_ADJUST_MIN_NET_PCT || '0.015');
 
 // Track last scan time for latency calculation
 const tradeStartTimes = new Map<string, number>();
@@ -350,7 +376,7 @@ export class CopyTradingManager {
                 const batch = symbolsToSync.slice(i, i + BATCH_SIZE);
                 const batchPromises = batch.map(symbol =>
                     Promise.race([
-                        this.syncPosition(symbol, 1.0, scanStartTime, aggregatedPositions, freshOurPositions, allMarkets, tradedSymbols),
+                        this.syncPosition(symbol, 1.0, scanStartTime, aggregatedPositions, freshOurPositions, allMarkets, tradedSymbols, ourPortfolio.portfolio),
                         new Promise((_, reject) =>
                             setTimeout(() => reject(new Error('Sync timeout')), 30000)
                         )
@@ -436,12 +462,14 @@ export class CopyTradingManager {
      * Priority-ordered budget allocation for copy trading positions.
      *
      * 1. Each target gets its own multiplier (COPY_SCALE_MULTIPLIERS, parallel to COPY_TRADERS).
-     * 2. Global budget = MAX_COPY_ALLOCATION (= 1 - independent allocation).
-     * 3. Targets processed in COPY_TRADERS order (first = highest priority).
+     * 2. Per-target hard cap on raw demand (COPY_MAX_TARGET_DEMAND_PCT) — defends against
+     *    targets with volatile TVL whose marginPct can spike on withdrawals.
+     * 3. Global budget = MAX_COPY_ALLOCATION (= 1 - independent allocation).
+     * 4. Targets processed in COPY_TRADERS order (first = highest priority).
      *    First target's positions are fully satisfied before the next target starts.
-     * 4. Within each target, positions sorted by descending margin demand — biggest
+     * 5. Within each target, positions sorted by descending margin demand — biggest
      *    conviction trades allocated first; small tail positions dropped if budget runs out.
-     * 5. Cross-target netting: opposite-side positions cancel and refund budget.
+     * 6. Cross-target netting: opposite-side positions cancel and refund budget.
      *
      * Deterministic: same target state always produces the same position set.
      */
@@ -504,11 +532,15 @@ export class CopyTradingManager {
             // Total raw demand for this target (sum of all position marginPcts)
             const targetTotalDemand = demands.reduce((sum, d) => sum + d.marginPct, 0);
 
-            // This target's budget = min(its total demand, remaining global budget)
-            const targetBudget = Math.min(targetTotalDemand, remainingBudget);
+            // Per-target hard cap on demand (defends against volatile target TVL inflating marginPct)
+            const targetMaxDemand = getTargetMaxDemand(traderIndex >= 0 ? traderIndex : 0);
+            const cappedDemand = Math.min(targetTotalDemand, targetMaxDemand);
 
-            // Proportional scale: if demand exceeds budget, scale all positions equally.
-            // This prevents upstream position changes from cascading to downstream positions.
+            // This target's budget = min(capped demand, remaining global budget)
+            const targetBudget = Math.min(cappedDemand, remainingBudget);
+
+            // Proportional scale: if (capped) demand exceeds budget, scale all positions equally.
+            // Always relative to raw demand so per-position allocations shrink under either constraint.
             const proportionalScale = targetTotalDemand > 0.001
                 ? targetBudget / targetTotalDemand
                 : 0;
@@ -552,7 +584,10 @@ export class CopyTradingManager {
 
             remainingBudget -= targetAllocated;
 
-            const scaleTag = proportionalScale < 0.999 ? `(${(proportionalScale * 100).toFixed(0)}%)` : '';
+            const cappedByMax = cappedDemand < targetTotalDemand;
+            const scaleTag = proportionalScale < 0.999
+                ? `(${(proportionalScale * 100).toFixed(0)}%${cappedByMax ? ' cap' : ''})`
+                : '';
             allocSummaries.push(`${trader.slice(0, 10)}=${(targetAllocated * 100).toFixed(1)}%${scaleTag}`);
         }
 
@@ -598,6 +633,7 @@ export class CopyTradingManager {
         ourPositions: any,
         allMarkets: Record<string, string>,
         tradedSymbols: Set<string>,
+        ourPortfolioValue: number,
     ) {
         // Look up aggregated desired position for this symbol
         const desired = aggregatedPositions.get(ticker);
@@ -688,7 +724,17 @@ export class CopyTradingManager {
             const adjustThreshold = desired?.adjustThreshold ?? 0.10;
             const sizeThreshold = targetSizeForUs * adjustThreshold;
 
-            if (sizeDiff > sizeThreshold) {
+            // Absolute dead-band: ignore adjustments whose margin delta is a tiny fraction
+            // of our portfolio. Heavily-netted symbols (large conviction position from one
+            // target nearly cancelled by an opposing target) leave a small noisy residual;
+            // without this floor, scan-to-scan wobble in either leg trips the % threshold
+            // every cycle and churns market-order fees (see BTC netting churn: two vaults
+            // short vs bd9c long). For un-netted positions the % threshold stays binding.
+            const price = Number(allMarkets[ticker]);
+            const deltaMarginUsd = price && targetLeverage ? (sizeDiff * price) / targetLeverage : 0;
+            const deadbandMarginUsd = ourPortfolioValue * COPY_ADJUST_MIN_NET_PCT;
+
+            if (sizeDiff > sizeThreshold && deltaMarginUsd > deadbandMarginUsd) {
                 positionDelta.needsAction = true;
                 positionDelta.action = 'adjust';
             }

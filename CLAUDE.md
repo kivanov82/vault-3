@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot
 
 **Project Status:** Phase 5 — Optimization & Scaling
-**Last Updated:** 2026-04-23
+**Last Updated:** 2026-06-04
 
 A multi-target copytrading bot for Hyperliquid with an integrated autonomous trading module that runs alongside copy trading.
 
@@ -49,21 +49,24 @@ All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` 
 
 Deterministic algorithm — same target state always produces the same position set.
 
-1. **Per-target multipliers** (`COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0`, parallel to COPY_TRADERS):
+1. **Per-target multipliers** (`COPY_SCALE_MULTIPLIERS=2.0,2.5,0.5`, parallel to COPY_TRADERS):
    `ourMarginPct_i = (positionNotional / leverage / targetPortfolio) × multiplier_i`
-2. **Global budget:** `MAX_COPY_ALLOCATION = 1.0 - independentAllocation` (default 0.70).
-3. **Priority ordering:** targets processed in COPY_TRADERS order (first = highest priority).
+2. **Per-target demand cap** (`COPY_MAX_TARGET_DEMAND_PCT=1.0,1.0,0.15`, parallel to COPY_TRADERS): hard ceiling on a target's combined raw demand as a fraction of our portfolio. Defends against targets with volatile TVL whose `marginPct` spikes when they withdraw capital. Defaults to `1.0` (effectively unconstrained vs the 70% global cap).
+3. **Global budget:** `MAX_COPY_ALLOCATION = 1.0 - independentAllocation` (default 0.70).
+4. **Priority ordering:** targets processed in COPY_TRADERS order (first = highest priority).
    First target's positions fully satisfied before second starts consuming budget.
-4. **Within-target ordering:** positions sorted by descending margin demand.
+5. **Within-target ordering:** positions sorted by descending margin demand.
    Biggest conviction trades allocated first; small tail positions dropped if budget exhausted.
-5. **Cross-target netting:** opposite-side positions cancel and refund budget.
-6. `ourMargin = allocatedMarginPct × ourPortfolio`, then `size = ourMargin × leverage / price`.
+6. **Cross-target netting:** opposite-side positions cancel and refund budget.
+7. `ourMargin = allocatedMarginPct × ourPortfolio`, then `size = ourMargin × leverage / price`.
 
 No `/numTargets` divisor. Adding a target with 0 exposure has zero effect. Low-priority targets with many positions get whatever budget remains (tail positions may be dropped).
 
+**Adjust dead-band** (`COPY_ADJUST_MIN_NET_PCT`, default `0.015`): an `adjust` only fires when the margin delta exceeds **both** the per-symbol % threshold **and** this floor (~1.5% of our portfolio in margin terms). Heavily-netted symbols leave a small noisy *residual* (a big conviction position from one target nearly cancelled by an opposing target — e.g. two vaults short BTC vs bd9c long BTC at near-equal size). Without the floor, scan-to-scan wobble in either leg trips the % threshold every cycle and churns market-order fees. For large, un-netted positions the % threshold stays binding, so tracking fidelity is unchanged there.
+
 ### Copy trading
 - Mode: `scaled`, position-based
-- Scale multipliers: **3.0, 3.0, 1.0** (per-target, parallel to COPY_TRADERS)
+- Scale multipliers: **2.0, 2.5, 0.5** (per-target, parallel to COPY_TRADERS) — Archangel reduced 3.0 → 2.5 on 2026-05-22 for risk reduction
 - Leverage: exact 1:1 with target
 - Slippage: 1% for market orders
 - Scan interval: 5 minutes
@@ -72,7 +75,7 @@ No `/numTargets` divisor. Adding a target with 0 exposure has zero effect. Low-p
 | Setting | Value |
 |---|---|
 | Max allocation | 30% of vault |
-| Max concurrent positions | 5 |
+| Max concurrent positions | 3 (live; code default 5) |
 | Leverage | 5x |
 | Max hold | 72h |
 | Hard stop | **-10%** from entry (price move, not margin) |
@@ -89,10 +92,12 @@ ENABLE_INDEPENDENT_TRADING=true
 ENABLE_FUNDING_COLLECTION=true
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
-COPY_SCALE_MULTIPLIERS=3.0,3.0,1.0
+COPY_SCALE_MULTIPLIERS=2.0,2.5,0.5
+COPY_MAX_TARGET_DEMAND_PCT=1.0,1.0,0.15
 COPY_ADJUST_THRESHOLDS=0.10,0.10,0.20
 MIN_ADJUSTMENT_VALUE_USD=20
 COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
+INDEPENDENT_MAX_POSITIONS=3
 ```
 
 ---
@@ -307,6 +312,7 @@ npm run docker-push
 
 - Minimum adjustment/open notional: `MIN_ADJUSTMENT_VALUE_USD` (default $10, live $20). Gates full notional on open and delta notional on adjust — suppresses dust churn above the $10 exchange hard minimum.
 - Per-target adjust thresholds: `COPY_ADJUST_THRESHOLDS` (live `0.10,0.10,0.20` — bd9c wider to ignore intraday rotation). Each symbol inherits the threshold of whichever target contributes the most margin to it.
+- Adjust dead-band: `COPY_ADJUST_MIN_NET_PCT` (default `0.015`). Absolute floor on the margin delta required to fire an `adjust`, ~1.5% of portfolio. Stops fee-churn on heavily-netted symbols whose traded size is a small noisy residual (see 2026-06-04 changelog). Binds only when the % threshold doesn't; large un-netted positions are unaffected.
 - Slippage control: 1% for market orders
 - Database health: auto-reconnect on failures
 - Global error handlers prevent crashes
@@ -330,6 +336,22 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-06-04 — Adjust dead-band (BTC netting churn fix)
+
+**Symptom:** BTC fired an `ADJUST` almost every 5-min scan, swinging size wildly (`0.0045 → 0.0094 → 0.0163 → 0.0126 → 0.0145 …`) — looked like repeated open/close.
+
+**Root cause:** catastrophic cancellation across targets. Live BTC legs: Bitcoin MA short 14.0% + Archangel short 0.95% (= ~14.95% short) vs **bd9c long 12.6%** (`$761K / 40x / $75.5K TVL × 0.5`). Cross-target netting leaves a small residual short (~2.35% margin ≈ our `-0.0145 BTC`). The traded position is the *difference of two big opposing legs*, so a ~5% wobble in bd9c's leg (he trades BTC on 40x with volatile personal-wallet TVL) becomes a ±35% swing on the residual — clearing the 10% adjust band every cycle and burning taker fees ~288×/day. Neither existing guard caught it: `MIN_ADJUSTMENT_VALUE_USD=$20` (deltas were ~$300 notional) nor `COPY_MAX_TARGET_DEMAND_PCT` (bd9c's 12.6% demand is already under his 15% cap), and BTC inherits b1505's `0.10` threshold (dominant contributor), not bd9c's wider `0.20`.
+
+**Fix:** added `COPY_ADJUST_MIN_NET_PCT` (default `0.015`) in `CopyTradingManager.syncPosition`. An `adjust` now requires the margin delta to exceed **both** the per-symbol % threshold **and** ~1.5% of portfolio margin (`deltaMarginUsd = sizeDiff × price / leverage` vs `ourPortfolioValue × 0.015`). Validated against live logs: all observed churn deltas ($11–21.5 margin) are suppressed; a real target move (bd9c exiting BTC → $242 margin delta) still fires. Un-netted large positions are unaffected — the % threshold stays binding there. No env change needed to deploy (code default 0.015); tunable live via env if needed.
+
+### 2026-05-23 — Per-target demand cap
+
+Added `COPY_MAX_TARGET_DEMAND_PCT` env var (parallel to `COPY_TRADERS`), a hard ceiling on each target's combined raw demand as a fraction of our portfolio. Applied after the per-target multiplier and before the global 70% budget allocation. Defaults to `1.0` (uncapped) per target.
+
+Live config: `1.0,1.0,0.15` — Bitcoin MA and Archangel uncapped (stable vault TVL), bd9c capped at 15%. Motivation: bd9c's personal-wallet TVL swings ~10× between ~$67K and ~$700K, which inflates his `marginPct` and our copied exposure for the same trade. Cap decouples his sizing from his withdrawal/deposit activity.
+
+Allocation log line now appends `cap` to the scale tag when the cap is the binding constraint, e.g. `0xbd9c944d=15.0%(37% cap)`, so it's distinguishable from budget-constrained scaling.
 
 ### 2026-04-22 — Margin-handling fixes across copy + independent paths
 
