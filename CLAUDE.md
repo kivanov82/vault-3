@@ -124,9 +124,9 @@ INDEPENDENT_MAX_POSITIONS=3
 | 6 | RSI high | long | `rsi14 > 70` |
 | 7 | EMA take-profit | long | `price < ema9 && price < ema21` AND in profit |
 | 5' | BB mean | short | `0.4 ≤ bbPosition ≤ 0.6` AND in profit |
-| 6' | EMA take-profit | short | `price < ema9 && price < ema21` AND in profit |
+| 6' | EMA take-profit | short | `price > ema9 && price > ema21` AND in profit (downtrend exhausted) |
 
-Indicator exits (5–7) require at least 1 hour of holding so they don't contradict entry signals.
+Indicator exits skip the first **10 minutes** of holding (`MIN_HOLD_FOR_INDICATORS_MS`) so they don't contradict entry signals. The short EMA take-profit mirrors the long: price *below* the EMAs is the favorable downtrend a short rides (not an exit); it takes profit when price rebounds *above* both EMAs.
 
 ---
 
@@ -336,6 +336,12 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-06-04 — Fix inverted short EMA take-profit (shorts exited in ~15min)
+
+`IndependentTrader.checkIndicatorExit` short branch used the same EMA condition as the long branch (`price < ema9 && price < ema21`) without flipping the inequality. For a short, price below the EMAs is the favorable *downtrend* — so the "take-profit" fired the instant a short started working: 19/20 recent shorts exited via `indicator_ema_tp` at a median **15-minute hold** for a few bps each. The inverted condition also ran as the entry gate, so shorts were only opened when price was *above* the EMAs (shorting into strength).
+
+Fix: short EMA-TP is now `price > ema9 && price > ema21 && pnl >= 0` (mirror of the long) — hold while price is below the EMAs, take profit when price rebounds above both. Fixes the entry gate symmetrically too (shorts now allowed in downtrends). Also corrected the stale doc: indicator exits skip the first **10 minutes** (`MIN_HOLD_FOR_INDICATORS_MS`), not 1 hour.
 
 ### 2026-06-04 — Remove MON from independent whitelist
 

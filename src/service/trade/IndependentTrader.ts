@@ -435,8 +435,12 @@ export class IndependentTrader {
       if (bbPosition !== null && bbPosition >= CONFIG.EXIT_BB_MEAN_LOW && bbPosition <= CONFIG.EXIT_BB_MEAN_HIGH && pnlFromEntry >= 0) {
         return 'indicator_bb_mean';
       }
-      // Price below both EMAs → take profit short
-      if (ema9 !== null && ema21 !== null && price < ema9 && price < ema21 && pnlFromEntry >= 0) {
+      // Price back ABOVE both EMAs → downtrend exhausted, take profit short.
+      // Mirror of the long rule (price < EMAs): for a short, price BELOW the EMAs is the
+      // favorable downtrend we want to ride, NOT an exit. Previously this used `price < ema9`
+      // (copy-pasted from the long branch without flipping the inequality), which fired the
+      // instant a short started working — closing every short ~10-15min in for a few bps.
+      if (ema9 !== null && ema21 !== null && price > ema9 && price > ema21 && pnlFromEntry >= 0) {
         return 'indicator_ema_tp';
       }
     }
