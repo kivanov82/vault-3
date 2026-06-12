@@ -60,6 +60,10 @@ const CONFIG = {
   // v5: Indicator-based exit strategy
   MAX_HOLD_HOURS: parseInt(process.env.INDEPENDENT_MAX_HOLD_HOURS || '72', 10),
   HARD_STOP_PCT: parseFloat(process.env.INDEPENDENT_HARD_STOP_PCT || '0.10'),          // -10% from entry (target median loss -4%, avg -8%, 11% beyond -10%)
+  // Exchange-side disaster backstop: resting stop-market trigger placed at open.
+  // Sits BEYOND the scan-based hard stop — only fires when price gaps past -10%
+  // between 5-min scans, or when the bot is down entirely. 0 disables.
+  BACKSTOP_STOP_PCT: parseFloat(process.env.INDEPENDENT_BACKSTOP_STOP_PCT || '0.12'),
 
   // Indicator exit thresholds (from 109 cycle analysis)
   EXIT_BB_UPPER: 0.8,    // LONG: BB > 0.8 = 0% WR, -23% avg → exit
@@ -73,7 +77,9 @@ const CONFIG = {
 
   // Whitelist: proven performers from target vault cycle analysis.
   // MON removed 2026-06-04 — 155 trades / 90d, 46% win, -$78 net (high churn, no edge).
-  WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'FARTCOIN'],
+  // ZEC added 2026-06-12 — best candidate in 7-ticker backtest (Dec–Jun: +$48, Apr–Jun: +$52,
+  // best-in-book both windows) + best large-sample shadow-prediction symbol (10K preds, 54% win).
+  WHITELIST: ['HYPE', 'SOL', 'VVV', 'ETH', 'FARTCOIN', 'ZEC'],
 };
 
 export class IndependentTrader {
@@ -257,6 +263,22 @@ export class IndependentTrader {
         return;
       }
 
+      // Fetch our exchange positions once for reconciliation: a DB-open position
+      // with no matching exchange position was closed externally (backstop trigger
+      // fired between scans, bot was down during a stop-out, manual intervention).
+      // It must not go through the normal exit paths — nothing is left to close.
+      let exchangeSideMap: Map<string, string> | null = null; // symbol → 'long' | 'short'
+      try {
+        const ourState = await HyperliquidConnector.getOpenPositions(WALLET);
+        exchangeSideMap = new Map(
+          ourState.assetPositions
+            .filter((ap: any) => ap.position.szi !== '0')
+            .map((ap: any) => [ap.position.coin, HyperliquidConnector.positionSide(ap.position)] as [string, string])
+        );
+      } catch (e: any) {
+        logger.warn(`⚠️  Independent: skipping reconciliation, could not fetch exchange positions: ${e.message}`);
+      }
+
       // Get target's current positions for confirmation check
       const targetPositionMap = new Map<string, { side: string; size: number }>();
       for (const ap of targetPositions.assetPositions) {
@@ -275,15 +297,31 @@ export class IndependentTrader {
           continue;
         }
 
+        // === 0. RECONCILE EXTERNALLY-CLOSED POSITIONS ===
+        // Only for status 'open' — confirmed positions' exchange side belongs to copy trading.
+        if (exchangeSideMap && pos.status === 'open' && exchangeSideMap.get(pos.symbol) !== pos.side) {
+          let reason = 'external_close';
+          let exitPx = currentPrice;
+          if (pos.backstopOid != null) {
+            const orderStatus = await HyperliquidConnector.getOrderStatus(Number(pos.backstopOid));
+            if (orderStatus === 'filled' || orderStatus === 'triggered') {
+              reason = 'backstop_stop';
+              // Approximate fill at the trigger price; reconcile-pnl.ts corrects from fills later
+              exitPx = pos.side === 'long'
+                ? pos.entryPrice * (1 - CONFIG.BACKSTOP_STOP_PCT)
+                : pos.entryPrice * (1 + CONFIG.BACKSTOP_STOP_PCT);
+            }
+          }
+          await this.markClosedRecordOnly(pos, exitPx, reason);
+          continue;
+        }
+
         // === 1. TARGET CONFIRMATION CHECK ===
         const targetPos = targetPositionMap.get(pos.symbol);
         if (targetPos) {
           if (targetPos.side === pos.side) {
             if (!pos.confirmedByTarget) {
-              await prisma.independentPosition.update({
-                where: { id: pos.id },
-                data: { confirmedByTarget: true, status: 'confirmed' },
-              });
+              await this.confirmPosition(pos.symbol);
               logger.info(`✅ ${pos.symbol}: Independent position CONFIRMED by target (same direction)`);
             }
             continue;
@@ -489,6 +527,15 @@ export class IndependentTrader {
         price
       );
 
+      // Exchange-side disaster backstop (best-effort — scan-based hard stop is primary)
+      let backstopOid: number | null = null;
+      if (CONFIG.BACKSTOP_STOP_PCT > 0) {
+        const triggerPx = isLong
+          ? price * (1 - CONFIG.BACKSTOP_STOP_PCT)
+          : price * (1 + CONFIG.BACKSTOP_STOP_PCT);
+        backstopOid = await HyperliquidConnector.placeStopTrigger(tickerConfig, isLong, size, triggerPx);
+      }
+
       // Record in database
       await prisma.independentPosition.create({
         data: {
@@ -505,11 +552,13 @@ export class IndependentTrader {
           confirmedByTarget: false,
           predictionScore: score,
           predictionReasons: reasons,
+          backstopOid: backstopOid != null ? BigInt(backstopOid) : null,
         },
       });
 
       const dirLabel = isLong ? 'LONG' : 'SHORT';
-      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN ${dirLabel} ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, $${notionalUsd.toFixed(0)} notional, indicator exits + hard stop ${(CONFIG.HARD_STOP_PCT*100)}%, max ${CONFIG.MAX_HOLD_HOURS}h, score: ${score})`);
+      const backstopLabel = backstopOid != null ? `, backstop ${(CONFIG.BACKSTOP_STOP_PCT*100)}% oid ${backstopOid}` : '';
+      logger.info(`🎯 ${symbol}: INDEPENDENT OPEN ${dirLabel} ${size.toFixed(4)} @ $${price.toFixed(2)} (${leverage}x, $${notionalUsd.toFixed(0)} notional, indicator exits + hard stop ${(CONFIG.HARD_STOP_PCT*100)}%${backstopLabel}, max ${CONFIG.MAX_HOLD_HOURS}h, score: ${score})`);
 
     } catch (error: any) {
       logger.error(`❌ ${symbol}: Independent open failed - ${error.message}`);
@@ -527,6 +576,7 @@ export class IndependentTrader {
       size: number;
       entryPrice: number;
       sizeUsd: number;
+      backstopOid?: bigint | null;
     },
     exitPrice: number,
     reason: string
@@ -549,6 +599,11 @@ export class IndependentTrader {
         exitPrice
       );
 
+      // Remove the resting backstop trigger (no-op if it already filled/canceled)
+      if (position.backstopOid != null) {
+        await HyperliquidConnector.cancelOrder(tickerConfig.id, Number(position.backstopOid));
+      }
+
       // Use actual fill price from order response, fallback to market price
       const fillPrice = HyperliquidConnector.getFillPrice(orderResult) ?? exitPrice;
 
@@ -567,6 +622,7 @@ export class IndependentTrader {
           closedAt: new Date(),
           realizedPnl,
           realizedPnlPct,
+          backstopOid: null,
         },
       });
 
@@ -588,6 +644,44 @@ export class IndependentTrader {
     } catch (error: any) {
       logger.error(`❌ ${symbol}: Independent close failed - ${error.message}`);
     }
+  }
+
+  /**
+   * Close the DB record without touching the exchange — the position is already gone
+   * (backstop fired, liquidation, or manual close). Cancels any still-resting backstop
+   * trigger so it can't fire against a future position on the same symbol.
+   */
+  private static async markClosedRecordOnly(
+    position: { id: string; symbol: string; side: string; size: number; entryPrice: number; backstopOid?: bigint | null },
+    exitPrice: number,
+    reason: string
+  ): Promise<void> {
+    if (position.backstopOid != null && reason !== 'backstop_stop') {
+      const tickerConfig = this.getTickerConfig(position.symbol);
+      if (tickerConfig) {
+        await HyperliquidConnector.cancelOrder(tickerConfig.id, Number(position.backstopOid));
+      }
+    }
+
+    const priceDiff = exitPrice - position.entryPrice;
+    const realizedPnl = position.side === 'long' ? priceDiff * position.size : -priceDiff * position.size;
+    const realizedPnlPct = (priceDiff / position.entryPrice) * 100 * (position.side === 'long' ? 1 : -1);
+
+    await prisma.independentPosition.update({
+      where: { id: position.id },
+      data: {
+        status: 'closed',
+        exitPrice,
+        exitReason: reason,
+        closedAt: new Date(),
+        realizedPnl,
+        realizedPnlPct,
+        backstopOid: null,
+      },
+    });
+
+    const pnlEmoji = realizedPnl >= 0 ? '💰' : '📉';
+    logger.info(`🛡️ ${position.symbol}: INDEPENDENT RECONCILE-CLOSE ${reason} @ $${exitPrice.toFixed(2)} ${pnlEmoji} P&L: $${realizedPnl.toFixed(2)} (${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%)`);
   }
 
   /**
@@ -631,6 +725,15 @@ export class IndependentTrader {
     });
     if (!position) return;
 
+    // Cancel the resting backstop trigger — copy trading takes over the symbol, and a
+    // stale reduce-only stop sized for the independent position must not linger.
+    if (position.backstopOid != null) {
+      const tickerConfig = this.getTickerConfig(symbol);
+      if (tickerConfig) {
+        await HyperliquidConnector.cancelOrder(tickerConfig.id, Number(position.backstopOid));
+      }
+    }
+
     const priceDiff = exitPrice - position.entryPrice;
     const realizedPnl = position.side === 'long' ? priceDiff * position.size : -priceDiff * position.size;
     const realizedPnlPct = (priceDiff / position.entryPrice) * 100 * (position.side === 'long' ? 1 : -1);
@@ -644,6 +747,7 @@ export class IndependentTrader {
         closedAt: new Date(),
         realizedPnl,
         realizedPnlPct,
+        backstopOid: null,
       },
     });
 
@@ -656,14 +760,26 @@ export class IndependentTrader {
    * Called when copy trading detects target opened same position
    */
   static async confirmPosition(symbol: string): Promise<void> {
-    await prisma.independentPosition.updateMany({
-      where: {
-        symbol,
-        status: 'open',
-      },
+    const position = await prisma.independentPosition.findFirst({
+      where: { symbol, status: 'open' },
+    });
+    if (!position) return;
+
+    // Copy trading takes over the exchange position (and may resize it) — the
+    // independent backstop trigger must not survive the handover.
+    if (position.backstopOid != null) {
+      const tickerConfig = this.getTickerConfig(symbol);
+      if (tickerConfig) {
+        await HyperliquidConnector.cancelOrder(tickerConfig.id, Number(position.backstopOid));
+      }
+    }
+
+    await prisma.independentPosition.update({
+      where: { id: position.id },
       data: {
         confirmedByTarget: true,
         status: 'confirmed',
+        backstopOid: null,
       },
     });
   }

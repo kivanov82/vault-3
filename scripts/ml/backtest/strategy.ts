@@ -459,7 +459,10 @@ export function checkIndicatorExit(
     if (cfg.useBbMeanExit && bbPosition != null && bbPosition >= cfg.bbMeanLow && bbPosition <= cfg.bbMeanHigh && pnlFromEntry >= 0) {
       return 'indicator_bb_mean';
     }
-    if (cfg.useEmaTpExit && ema9 != null && ema21 != null && price < ema9 && price < ema21 && pnlFromEntry >= 0) {
+    // Price back ABOVE both EMAs → downtrend exhausted, take profit. Mirrors the
+    // 2026-06-04 live fix in IndependentTrader: price BELOW the EMAs is the
+    // favorable downtrend a short rides, not an exit.
+    if (cfg.useEmaTpExit && ema9 != null && ema21 != null && price > ema9 && price > ema21 && pnlFromEntry >= 0) {
       return 'indicator_ema_tp';
     }
   }

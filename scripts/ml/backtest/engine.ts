@@ -61,8 +61,19 @@ export interface BacktestConfig {
    *   'v7'       — v7 with sentiment rule table replacing macro regime
    *   'v6_veto'  — v6 scoring but reject entries that contradict sentiment rule
    *   'v6_threshold' — v6 scoring, score threshold adjusted by sentiment agreement
+   *   'v6_regime_asym' — v6 scoring, entry thresholds vary by the scorer's own
+   *                      macro regime (regimeThresholds); regime read from reasons
    */
-  scorer?: 'v6' | 'v7' | 'v6_veto' | 'v6_threshold';
+  scorer?: 'v6' | 'v7' | 'v6_veto' | 'v6_threshold' | 'v6_regime_asym';
+  /**
+   * Per-regime entry threshold overrides for 'v6_regime_asym'. Missing fields fall
+   * back to entry.minScoreLong/minScoreShort. Use Infinity to disable a side.
+   */
+  regimeThresholds?: {
+    bear?: { long?: number; short?: number };
+    bull?: { long?: number; short?: number };
+    neutral?: { long?: number; short?: number };
+  };
   /** Pre-built sentiment panel. Required if scorer uses sentiment. */
   sentimentPanel?: SentimentPanel;
   /**
@@ -383,10 +394,25 @@ export async function runBacktest(
       // Filter by score cap if set
       if (cfg.entry.maxScoreCap != null && score > cfg.entry.maxScoreCap) continue;
 
-      // Apply direction/threshold gating
+      // Apply direction/threshold gating (regime-aware for v6_regime_asym)
+      let minScoreLong = cfg.entry.minScoreLong;
+      let minScoreShort = cfg.entry.minScoreShort;
+      if (cfg.scorer === 'v6_regime_asym' && cfg.regimeThresholds) {
+        // Read the scorer's own regime decision back from the reasons it emitted,
+        // so threshold gating uses exactly the regime the score was built with.
+        const regime: 'bear' | 'bull' | 'neutral' = reasons.includes('macro_bear_regime')
+          ? 'bear'
+          : reasons.includes('macro_bull_regime')
+            ? 'bull'
+            : 'neutral';
+        const rt = cfg.regimeThresholds[regime];
+        if (rt?.long != null) minScoreLong = rt.long;
+        if (rt?.short != null) minScoreShort = rt.short;
+      }
+
       let shouldEnter = false;
-      if (direction === 1 && cfg.entry.allowLongs && score >= cfg.entry.minScoreLong) shouldEnter = true;
-      if (direction === -1 && cfg.entry.allowShorts && score >= cfg.entry.minScoreShort) shouldEnter = true;
+      if (direction === 1 && cfg.entry.allowLongs && score >= minScoreLong) shouldEnter = true;
+      if (direction === -1 && cfg.entry.allowShorts && score >= minScoreShort) shouldEnter = true;
       if (!shouldEnter) continue;
 
       // Pre-check: would an indicator exit fire immediately? Skip if so.

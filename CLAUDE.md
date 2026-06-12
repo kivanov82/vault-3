@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot
 
 **Project Status:** Phase 5 — Optimization & Scaling
-**Last Updated:** 2026-06-04
+**Last Updated:** 2026-06-12
 
 A multi-target copytrading bot for Hyperliquid with an integrated autonomous trading module that runs alongside copy trading.
 
@@ -78,10 +78,11 @@ No `/numTargets` divisor. Adding a target with 0 exposure has zero effect. Low-p
 | Max concurrent positions | 3 (live; code default 5) |
 | Leverage | 5x |
 | Max hold | 72h |
-| Hard stop | **-10%** from entry (price move, not margin) |
+| Hard stop | **-10%** from entry (price move, not margin), checked every 5-min scan |
+| Backstop stop | **-12%** exchange-side stop-market trigger, reduce-only, placed at open (covers gaps past -10% between scans and bot downtime) |
 | Min score (LONG) | 90 |
 | Min score (SHORT) | 90 (symmetric with long) |
-| Whitelist | HYPE, SOL, VVV, ETH, FARTCOIN (MON removed 2026-06-04) |
+| Whitelist | HYPE, SOL, VVV, ETH, FARTCOIN, ZEC (MON removed 2026-06-04; ZEC added 2026-06-12) |
 | Scoring model | `momentum-v6` |
 
 ### Live environment variables (Cloud Run)
@@ -116,7 +117,8 @@ INDEPENDENT_MAX_POSITIONS=3
 
 | Priority | Rule | Applies to | Condition |
 |---|---|---|---|
-| 1 | Target confirmation | both | Target opens same direction → mark confirmed, copy trading takes over |
+| 0 | Reconcile external close | both | DB-open position missing on exchange → mark closed (`backstop_stop` if the -12% trigger filled, else `external_close`); never sends orders |
+| 1 | Target confirmation | both | Target opens same direction → mark confirmed, copy trading takes over (backstop trigger cancelled) |
 | 2 | Target opposite | both | Target opens opposite direction → close immediately |
 | 3 | Hard stop | both | Price moved ≥ 10% against entry → close |
 | 4 | Max hold | both | Position held ≥ 72h → close at market |
@@ -230,6 +232,7 @@ src/
 
 scripts/
 ├── check-recent.ts                     # Recent copy-trading activity (last 7d)
+├── last4d-stats.ts                     # Last-N-day combined stats: copy (per target) + independent
 └── ml/
     ├── backtest/                       # Backtest engine (strategy + engine + sentiment)
     │   ├── strategy.ts                 # v6 + v7 scoring functions, exit logic
@@ -242,12 +245,15 @@ scripts/
     ├── run-threshold-sweep.ts          # Sentiment threshold parameter sweep
     ├── run-majors-sentiment-test.ts    # Test sentiment on BTC/ETH/SOL whitelist
     ├── run-no-vvv-test.ts              # Ex-VVV sanity check
+    ├── run-regime-asym-test.ts         # Regime-aware asymmetric threshold variants
+    ├── run-candidate-tickers.ts        # Per-symbol whitelist-candidate eval (current strategy)
     │
     │   # Data backfills (one-shot, reusable)
     ├── backfill-indicators.ts          # Compute & persist historical indicators
     ├── backfill-sentiment-fills.ts     # Archangel + Bitcoin MA historical fills
     ├── backfill-higher-tf-candles.ts   # 4h + 1d candles
     ├── backfill-oos-data.ts            # Combined OOS data backfill
+    ├── backfill-candidate-tickers.ts   # Full 1h candle+indicator backfill for candidate symbols (batched)
     │
     │   # Historical study of legacy target 0x4cb5 (Jan–Mar 2026 window)
     ├── target-behavior.ts              # Target entry signature analysis
@@ -261,6 +267,8 @@ scripts/
     │   # Live monitoring
     ├── weekly-independent-analysis.ts  # Past N-day independent trading performance
     ├── independent-stats.ts            # All-time independent stats (ml:independent-stats)
+    ├── independent-windows.ts          # Independent stats across 7/30/90-day windows
+    ├── recent-shorts.ts                # Recent independent shorts: hold times + exit reasons
     ├── prediction-stats.ts             # Prediction scoring stats (ml:stats)
     ├── sentiment-ab.ts                 # Directional vs contrarian sentiment A/B (ml:sentiment-ab)
     ├── reconcile-pnl.ts                # Reconcile independent P&L vs HL fills (ml:reconcile)
@@ -313,6 +321,7 @@ npm run docker-push
 - Minimum adjustment/open notional: `MIN_ADJUSTMENT_VALUE_USD` (default $10, live $20). Gates full notional on open and delta notional on adjust — suppresses dust churn above the $10 exchange hard minimum.
 - Per-target adjust thresholds: `COPY_ADJUST_THRESHOLDS` (live `0.10,0.10,0.20` — bd9c wider to ignore intraday rotation). Each symbol inherits the threshold of whichever target contributes the most margin to it.
 - Adjust dead-band: `COPY_ADJUST_MIN_NET_PCT` (default `0.015`). Absolute floor on the margin delta required to fire an `adjust`, ~1.5% of portfolio. Stops fee-churn on heavily-netted symbols whose traded size is a small noisy residual (see 2026-06-04 changelog). Binds only when the % threshold doesn't; large un-netted positions are unaffected.
+- Independent backstop stop: `INDEPENDENT_BACKSTOP_STOP_PCT` (default `0.12`). Exchange-side reduce-only stop-market trigger resting at -12% from entry on every independent position — caps gap risk past the scan-based -10% stop and covers bot downtime. 0 disables.
 - Slippage control: 1% for market orders
 - Database health: auto-reconnect on failures
 - Global error handlers prevent crashes
@@ -336,6 +345,28 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-06-12 — Exchange-side backstop stop, ZEC whitelist addition, backtest fixes
+
+**Context:** 2026-06-12 performance review. The 06-04 fixes all verified in live data (best week on record: +$655/7d, 88% win; shorts now hold 13–36h and exit via `bb_mean`; zero MON trades; BTC adjust churn gone — 26 fills/8d vs ~churn-every-scan). Hard stops are now the only loss category (90d: 17 stops = -$777 vs ~+$1,680 from everything else), and the 06-09 VVV stop exited at **-11.09%** vs the -10% intent because stops are only checked at 5-min scan boundaries.
+
+**Exchange-side backstop stop (`INDEPENDENT_BACKSTOP_STOP_PCT`, default 0.12):**
+- On every independent open, a reduce-only stop-market trigger order rests on HL at -12% from entry (`HyperliquidConnector.placeStopTrigger`). The scan-based -10% stop stays primary; the backstop only fires if price gaps past it between scans or the bot is down. Costs nothing while resting (reduce-only = no margin reserved).
+- Order id stored in `IndependentPosition.backstopOid` (new BigInt column). Cancelled on every close path: indicator/stop/timeout closes, `forceClosePosition` (copy override), and target confirmation (`confirmPosition`) — a stale reduce-only stop must never linger into a copy-managed position.
+- New reconcile step in `managePositions` (runs first): a DB-open position with no matching exchange position was closed externally — if the backstop order filled, the row is closed as `backstop_stop` (exit ≈ trigger price); otherwise `external_close` at market. Never sends orders. Also cleans up phantom rows when an open order was silently skipped.
+
+**ZEC added to independent whitelist** (HYPE, SOL, VVV, ETH, FARTCOIN, ZEC):
+- 7-candidate backtest (ZEC, XMR, PENGU, NEAR, PUMP, SPX, BLUR) with the current live strategy, per-symbol, two windows (Dec 1–Jun 12 + Apr 1–Jun 12), after backfilling complete 1h candles+indicators (`backfill-candidate-tickers.ts`).
+- ZEC: **+$48 full / +$52 recent** (per $100 notional), best-in-book in the recent window, 20.6% max DD — and corroborated by the largest live shadow-prediction sample (10K+ validated, 54% win, +1.24% avg @ 4h). XMR breakeven-but-stable (watch). PUMP/PENGU/NEAR/SPX clearly negative, BLUR inconsistent — all rejected.
+- bd9c actively trades ZEC on the main DEX; entry rule "target has no position" defers to copy trading automatically when he holds it.
+
+**Backtest framework: short EMA take-profit was still inverted** (`scripts/ml/backtest/strategy.ts`):
+- The 06-04 live fix in `IndependentTrader.checkIndicatorExit` was never mirrored into the backtest engine — all backtested shorts exited on the broken condition (and the entry gate blocked shorts in downtrends). Fixed to match live. **Lesson: live strategy logic and `backtest/strategy.ts` are duplicated by design — every live exit/entry change must be mirrored there.**
+
+**Regime-asymmetric thresholds: tested, NOT adopted:**
+- Motivation: 30d shadow predictions show all long score bands negative (-0.7 to -1.7% @ 4h) and all short bands positive (+1.4 to +2.2%) — direction dominates score in a bear regime.
+- `run-regime-asym-test.ts` (new `v6_regime_asym` scorer mode in the engine, per-regime threshold overrides) tested bear-long gates at 95/100/∞ over 4 windows. After the short-exit fix, none beat baseline robustly: `bear_noLong` wins 2 windows but loses OOS; `bear_L95/L100` blow up in the recent window (-$119/-$128 vs -$33 baseline). High variance + path-dependence dominate. **Keeping symmetric 90/90.**
+- Also fixed stale `ml:stats` default (`momentum-v3` → `momentum-v6`; it returned empty since the April model cleanup).
 
 ### 2026-06-04 — Fix inverted short EMA take-profit (shorts exited in ~15min)
 

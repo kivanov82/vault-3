@@ -277,6 +277,7 @@ model IndependentPosition {
   realizedPnlPct    Float?
   predictionScore   Float?
   predictionReasons String[]
+  backstopOid       BigInt?  // resting exchange-side stop-trigger order (disaster backstop)
   createdAt         DateTime @default(now())
 
   @@index([symbol, status])

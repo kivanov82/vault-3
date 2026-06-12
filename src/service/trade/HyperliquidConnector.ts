@@ -50,6 +50,70 @@ export class HyperliquidConnector {
     }
 
     /**
+     * Place a resting stop-market trigger order (reduce-only) as a disaster backstop.
+     * For a long position this is a sell triggered below market; for a short, a buy
+     * triggered above. Returns the resting order id, or null if placement failed.
+     */
+    static async placeStopTrigger(ticker: any, positionIsLong: boolean, size: number, triggerPx: number): Promise<number | null> {
+        try {
+            const priceDecimals = triggerPx < 1 ? 5 : (triggerPx < 10 ? 2 : 0);
+            // Limit price bounds slippage after trigger: 5% through the trigger price
+            const limitPx = positionIsLong ? triggerPx * 0.95 : triggerPx * 1.05;
+            const result = await this.getClients().wallet.order({
+                orders: [
+                    {
+                        a: ticker.id,
+                        b: !positionIsLong, // close direction
+                        p: limitPx.toFixed(priceDecimals).toString(),
+                        s: size.toFixed(ticker.szDecimals).toString(),
+                        r: true, // reduce-only — never opens or flips a position
+                        t: {
+                            trigger: {
+                                isMarket: true,
+                                triggerPx: triggerPx.toFixed(priceDecimals).toString(),
+                                tpsl: 'sl',
+                            },
+                        },
+                    },
+                ],
+                grouping: "na",
+            });
+            const status = (result as any)?.response?.data?.statuses?.[0];
+            if (status?.resting?.oid != null) return Number(status.resting.oid);
+            logger.warn(`⚠️  ${ticker.syn}: Backstop trigger did not rest (status: ${JSON.stringify(status)})`);
+            return null;
+        } catch (error: any) {
+            logger.error(`❌ ${ticker.syn}: Backstop trigger placement failed - ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Best-effort order cancel. Swallows errors (e.g. order already filled/canceled).
+     */
+    static async cancelOrder(assetId: number, oid: number): Promise<void> {
+        try {
+            await this.getClients().wallet.cancel({ cancels: [{ a: assetId, o: oid }] });
+        } catch (error: any) {
+            // Expected when the order already filled or was canceled — log at debug level only
+            logger.info(`ℹ️  Cancel oid ${oid} (asset ${assetId}): ${error.message}`);
+        }
+    }
+
+    /**
+     * Fetch an order's status ('open' | 'filled' | 'canceled' | 'triggered' | ...), or null on failure.
+     */
+    static async getOrderStatus(oid: number): Promise<string | null> {
+        try {
+            const res: any = await this.getClients().public.orderStatus({ user: TRADING_WALLET, oid });
+            if (res?.status === 'order') return res.order?.status ?? null;
+            return null; // unknownOid
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * Extract the actual fill price from an order response.
      * Returns avgPx if the order was filled, null otherwise.
      */

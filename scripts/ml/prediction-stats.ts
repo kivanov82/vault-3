@@ -18,7 +18,7 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 // Show stats for latest model version, or specify via CLI arg
-const MODEL_VERSION = process.argv[2] || 'momentum-v3';
+const MODEL_VERSION = process.argv[2] || 'momentum-v6';
 
 async function main() {
   console.log('📊 Prediction Stats (Momentum v2)\n');
