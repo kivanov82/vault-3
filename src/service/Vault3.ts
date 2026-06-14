@@ -1,5 +1,5 @@
 import schedule from "node-schedule";
-import {CopyTradingManager} from "./trade/CopyTradingManager";
+import {CopyTradingManager, getCopyExclusions} from "./trade/CopyTradingManager";
 import {StartupSync} from "./data/StartupSync";
 import {IndependentTrader} from "./trade/IndependentTrader";
 import dotenv from "dotenv";
@@ -18,9 +18,11 @@ export class Vault3 {
         const copyTraders = (process.env.COPY_TRADERS || '').split(',').filter(s => s.trim());
         console.log('\n🚀 Vault-3 Initializing...');
         console.log(`   Copy Trading: ${ENABLE_COPY_TRADING ? '✅ ENABLED' : '❌ DISABLED'} (${copyTraders.length} target${copyTraders.length !== 1 ? 's' : ''})`);
-        for (const t of copyTraders) {
-            console.log(`     → ${t.trim()}`);
-        }
+        const copyExclusions = getCopyExclusions();
+        copyTraders.forEach((t, i) => {
+            const excl = copyExclusions[i] ? `  [copy-excluded: ${copyExclusions[i]}]` : '';
+            console.log(`     → ${t.trim()}${excl}`);
+        });
         console.log(`   Independent Trading: ${IndependentTrader.isEnabled() ? '✅ ENABLED' : '❌ DISABLED'} (env: ${process.env.ENABLE_INDEPENDENT_TRADING})`);
 
         // Heartbeat to ensure process is alive and monitor resources

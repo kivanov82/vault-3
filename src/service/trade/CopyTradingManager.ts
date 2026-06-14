@@ -65,6 +65,32 @@ function getTargetMaxDemand(targetIndex: number): number {
     return COPY_MAX_TARGET_DEMAND_PCT[targetIndex] ?? 1.0;
 }
 
+// Per-target copy exclusion list, parallel to COPY_TRADERS. Any symbol listed for a
+// target is never copied from that target AND is invisible to IndependentTrader's
+// conflict view — so independent trading may take that symbol on its own signals.
+// Targets separated by ',' (POSITIONAL — empty entries preserved); symbols within a
+// target separated by '|'. e.g. COPY_EXCLUDE_SYMBOLS=,,HYPE → only the 3rd target
+// (bd9c) excludes HYPE; the two vaults exclude nothing. Default empty = no exclusions.
+//
+// Added 2026-06-14: copying bd9c's HYPE lost ~$949 over 30d (92% of all copy losses);
+// HYPE is exclusively his among targets. Our independent HYPE trading is profitable
+// (+$162/30d, 91% win), so excluding it from copy lets independent reclaim the symbol.
+const COPY_EXCLUDE_SYMBOLS: Set<string>[] = (process.env.COPY_EXCLUDE_SYMBOLS || '')
+    .split(',')
+    .map(entry => new Set(
+        entry.split('|').map(s => s.trim().toUpperCase()).filter(s => s.length > 0)
+    ));
+
+function isSymbolExcludedForTarget(targetIndex: number, symbol: string): boolean {
+    if (targetIndex < 0) return false;
+    return COPY_EXCLUDE_SYMBOLS[targetIndex]?.has(symbol.toUpperCase()) ?? false;
+}
+
+// Parsed copy exclusions per target index (for startup logging / verification).
+export function getCopyExclusions(): string[] {
+    return COPY_EXCLUDE_SYMBOLS.map(s => [...s].join('|'));
+}
+
 // Max fraction of portfolio allocated to copy trading = 1 - independent allocation.
 // Independent defaults to 30% → copy cap defaults to 70%.
 const INDEPENDENT_MAX_ALLOCATION_PCT = parseFloat(process.env.INDEPENDENT_MAX_ALLOCATION_PCT || '0.30');
@@ -419,16 +445,20 @@ export class CopyTradingManager {
      * for IndependentTrader conflict detection. If multiple targets hold the
      * same symbol, keeps the first one found.
      */
-    private static mergeTargetPositions(targets: { positions: any }[]): any {
+    private static mergeTargetPositions(targets: { trader: string; positions: any }[]): any {
         const seen = new Set<string>();
         const merged: any[] = [];
         for (const t of targets) {
+            const traderIndex = COPY_TRADERS.indexOf(t.trader as `0x${string}`);
             for (const ap of t.positions.assetPositions) {
                 const coin = ap.position.coin;
-                if (ap.position.szi !== '0' && !seen.has(coin)) {
-                    seen.add(coin);
-                    merged.push(ap);
-                }
+                if (ap.position.szi === '0' || seen.has(coin)) continue;
+                // Copy-excluded (target, symbol) pairs are hidden from IndependentTrader's
+                // conflict view: since copy never touches them, independent is free to trade
+                // them on its own signals without a phantom copy conflict.
+                if (isSymbolExcludedForTarget(traderIndex, coin)) continue;
+                seen.add(coin);
+                merged.push(ap);
             }
         }
         return { assetPositions: merged };
@@ -492,6 +522,10 @@ export class CopyTradingManager {
                 const coin = ap.position.coin;
                 const szi = Number(ap.position.szi);
                 if (szi === 0) continue;
+                // Per-target copy exclusion: don't generate demand for this (target, symbol).
+                // If no other target holds it, it drops out of aggregatedPositions and any
+                // existing copied position closes via the targetSide==='none' path in syncPosition.
+                if (isSymbolExcludedForTarget(traderIndex, coin)) continue;
 
                 const side = HyperliquidConnector.positionSide(ap.position) as 'long' | 'short';
                 const leverage = ap.position.leverage?.value || 1;

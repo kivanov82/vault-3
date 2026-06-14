@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot
 
 **Project Status:** Phase 5 — Optimization & Scaling
-**Last Updated:** 2026-06-12
+**Last Updated:** 2026-06-14
 
 A multi-target copytrading bot for Hyperliquid with an integrated autonomous trading module that runs alongside copy trading.
 
@@ -37,7 +37,7 @@ Copy trading and independent trading share the same scan cycle, asset metadata c
 |---|---|---|---|
 | `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` | vault | Bitcoin MA Long/Short | BTC-only, MA crossovers, 20x |
 | `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` | vault | Archangel Quant Fund I | BTC+SOL macro, 20x |
-| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others) |
+| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others). **HYPE excluded from copy 2026-06-14** (see changelog) — independent trading reclaims it. |
 
 All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints. The bd9c personal wallet also trades on HL's `xyz` builder-code DEX (oil, BRENTOIL) — those positions are not currently copied (we only query the main perps DEX).
 
@@ -96,10 +96,13 @@ COPY_POLL_INTERVAL_MINUTES=5
 COPY_SCALE_MULTIPLIERS=2.0,2.5,0.5
 COPY_MAX_TARGET_DEMAND_PCT=1.0,1.0,0.15
 COPY_ADJUST_THRESHOLDS=0.10,0.10,0.20
+COPY_EXCLUDE_SYMBOLS=,,HYPE
 MIN_ADJUSTMENT_VALUE_USD=20
 COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
 INDEPENDENT_MAX_POSITIONS=3
 ```
+
+`COPY_EXCLUDE_SYMBOLS` is parallel to `COPY_TRADERS` (positional — empty entries preserved), symbols within a target separated by `|`. `,,HYPE` = only bd9c (3rd target) never copies HYPE. Excluded `(target, symbol)` pairs are also hidden from `IndependentTrader`'s conflict view, so independent trading is free to take them on its own signals. Set via gcloud with a custom delimiter so the commas survive: `--update-env-vars "^@^COPY_EXCLUDE_SYMBOLS=,,HYPE"`.
 
 ---
 
@@ -320,6 +323,7 @@ npm run docker-push
 
 - Minimum adjustment/open notional: `MIN_ADJUSTMENT_VALUE_USD` (default $10, live $20). Gates full notional on open and delta notional on adjust — suppresses dust churn above the $10 exchange hard minimum.
 - Per-target adjust thresholds: `COPY_ADJUST_THRESHOLDS` (live `0.10,0.10,0.20` — bd9c wider to ignore intraday rotation). Each symbol inherits the threshold of whichever target contributes the most margin to it.
+- Per-target copy exclusion: `COPY_EXCLUDE_SYMBOLS` (live `,,HYPE` — bd9c's HYPE not copied). Parallel to `COPY_TRADERS`, symbols within a target `|`-separated. Excluded pairs generate no copy demand and are hidden from independent's conflict view (independent may then trade them). Default empty = no exclusions.
 - Adjust dead-band: `COPY_ADJUST_MIN_NET_PCT` (default `0.015`). Absolute floor on the margin delta required to fire an `adjust`, ~1.5% of portfolio. Stops fee-churn on heavily-netted symbols whose traded size is a small noisy residual (see 2026-06-04 changelog). Binds only when the % threshold doesn't; large un-netted positions are unaffected.
 - Independent backstop stop: `INDEPENDENT_BACKSTOP_STOP_PCT` (default `0.12`). Exchange-side reduce-only stop-market trigger resting at -12% from entry on every independent position — caps gap risk past the scan-based -10% stop and covers bot downtime. 0 disables.
 - Slippage control: 1% for market orders
@@ -345,6 +349,18 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-06-14 — Exclude bd9c's HYPE from copy trading (`COPY_EXCLUDE_SYMBOLS`)
+
+**Symptom:** 30-day combined P&L was −$126, with copy trading at **−$1,029** masked by independent at **+$903**. The 8-day snapshot from 06-12 had hidden this (it showed bd9c −$83, Archangel +$67).
+
+**Root cause:** copy-trading **HYPE lost −$949 over 30 days — 92% of the entire copy loss.** HYPE is exclusively bd9c's symbol (819 of his fills in 30d; the two vaults trade zero HYPE). Not variance — HYPE copy lost in 4 of 5 weeks (−$33, −$478, +$83, −$308, −$110). Loss is directional (gross −$924 vs only ~$25 fees), not churn: we hold bd9c's high-leverage HYPE exposure through its drawdowns, and our 5-min tracking lag means we capture his downside. Meanwhile our **independent** HYPE trading made **+$162/30d at 91% win** on our own signals — we're good at HYPE, bad at copying his.
+
+**Fix:** added `COPY_EXCLUDE_SYMBOLS` (parallel to `COPY_TRADERS`, `|`-separated symbols per target; positional, empty entries preserved). Live value `,,HYPE` excludes HYPE for bd9c only. Two effects:
+1. `aggregateTargetPositions` generates no demand for excluded `(target, symbol)` → HYPE drops out of the aggregate → any existing copied HYPE closes via the `targetSide==='none'` path. (At deploy time the only open HYPE was an *independent* short, which is protected — copy doesn't close unconfirmed independent positions — so the deploy closed nothing.)
+2. `mergeTargetPositions` hides excluded pairs from `IndependentTrader`'s conflict view, so independent is free to trade HYPE on its own signals (previously it deferred whenever a target held the symbol). This reclaims the +$162/30d independent edge that bd9c's near-constant HYPE presence used to block.
+
+Default empty = no exclusions (backward compatible). Set on Cloud Run with a custom delimiter so commas survive: `--update-env-vars "^@^COPY_EXCLUDE_SYMBOLS=,,HYPE"`. Startup log prints parsed exclusions per target (`→ 0xbd9c…  [copy-excluded: HYPE]`) to verify the delimiter survived. Other bd9c symbols (ETH etc.) and the two vaults are unaffected.
 
 ### 2026-06-12 — Exchange-side backstop stop, ZEC whitelist addition, backtest fixes
 
