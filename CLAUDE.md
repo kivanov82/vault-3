@@ -362,6 +362,8 @@ npm run docker-push
 
 Default empty = no exclusions (backward compatible). Set on Cloud Run with a custom delimiter so commas survive: `--update-env-vars "^@^COPY_EXCLUDE_SYMBOLS=,,HYPE"`. Startup log prints parsed exclusions per target (`→ 0xbd9c…  [copy-excluded: HYPE]`) to verify the delimiter survived. Other bd9c symbols (ETH etc.) and the two vaults are unaffected.
 
+**Deployed** 2026-06-14 in revision `vault-3-00089-m4n` (commit `7791181`). Verified: startup log showed `0xbd9c… [copy-excluded: HYPE]`; the only open HYPE was the protected independent short (untouched); bd9c was flat on HYPE at deploy so no copy close fired — the exclusion takes effect on his next HYPE open.
+
 ### 2026-06-12 — Exchange-side backstop stop, ZEC whitelist addition, backtest fixes
 
 **Context:** 2026-06-12 performance review. The 06-04 fixes all verified in live data (best week on record: +$655/7d, 88% win; shorts now hold 13–36h and exit via `bb_mean`; zero MON trades; BTC adjust churn gone — 26 fills/8d vs ~churn-every-scan). Hard stops are now the only loss category (90d: 17 stops = -$777 vs ~+$1,680 from everything else), and the 06-09 VVV stop exited at **-11.09%** vs the -10% intent because stops are only checked at 5-min scan boundaries.
@@ -383,6 +385,8 @@ Default empty = no exclusions (backward compatible). Set on Cloud Run with a cus
 - Motivation: 30d shadow predictions show all long score bands negative (-0.7 to -1.7% @ 4h) and all short bands positive (+1.4 to +2.2%) — direction dominates score in a bear regime.
 - `run-regime-asym-test.ts` (new `v6_regime_asym` scorer mode in the engine, per-regime threshold overrides) tested bear-long gates at 95/100/∞ over 4 windows. After the short-exit fix, none beat baseline robustly: `bear_noLong` wins 2 windows but loses OOS; `bear_L95/L100` blow up in the recent window (-$119/-$128 vs -$33 baseline). High variance + path-dependence dominate. **Keeping symmetric 90/90.**
 - Also fixed stale `ml:stats` default (`momentum-v3` → `momentum-v6`; it returned empty since the April model cleanup).
+
+**Deployed** 2026-06-12 in revision `vault-3-00088-rtt` (commit `d3f77dc`). `backstopOid` column pushed to Cloud SQL (additive/nullable). Verified clean startup + first scan; one transient DB-health-timeout at boot auto-reconnected.
 
 ### 2026-06-04 — Fix inverted short EMA take-profit (shorts exited in ~15min)
 
