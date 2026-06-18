@@ -1,7 +1,7 @@
 # Vault-3: Hyperliquid Copytrading Bot
 
 **Project Status:** Phase 5 — Optimization & Scaling
-**Last Updated:** 2026-06-14
+**Last Updated:** 2026-06-18
 
 A multi-target copytrading bot for Hyperliquid with an integrated autonomous trading module that runs alongside copy trading.
 
@@ -37,9 +37,11 @@ Copy trading and independent trading share the same scan cycle, asset metadata c
 |---|---|---|---|
 | `0xb1505ad1a4c7755e0eb236aa2f4327bfc3474768` | vault | Bitcoin MA Long/Short | BTC-only, MA crossovers, 20x |
 | `0x8c7bd04cf8d00d68ce8bc7d2f3f02f98d16a5ab0` | vault | Archangel Quant Fund I | BTC+SOL macro, 20x |
-| `0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8` | personal wallet | "Not In Employment" leader's personal trading | Active multi-symbol discretionary (BTC, HYPE, ETH + others). **HYPE excluded from copy 2026-06-14** (see changelog) — independent trading reclaims it. |
+| `0x5661a070eb13c7c55ac3210b2447d4bea426cbf5` | vault | +convexity | Concentrated BTC directional, single position, 20x. Added 2026-06-18 (see changelog) at 1x multiplier. |
 
-All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints. The bd9c personal wallet also trades on HL's `xyz` builder-code DEX (oil, BRENTOIL) — those positions are not currently copied (we only query the main perps DEX).
+All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` — HL treats vaults and personal wallets the same way for these endpoints.
+
+> **bd9c removed 2026-06-18.** The bd9c personal wallet (`0xbd9c944dcfb31cd24c81ebf1c974d950f44e42b8`) was dropped as a copy target — its personal-wallet TVL swung wildly ($67K↔$700K↔$89K) and it churned 35+ fills/day, making it too volatile to copy reliably. Replaced 1:1 by the +convexity vault (low-churn, 6% max DD, concentrated BTC directional — same profile as the two existing vaults). See changelog.
 
 ### Portfolio split
 - **70% copy trading** (global cap = `1.0 - INDEPENDENT_MAX_ALLOCATION_PCT`)
@@ -49,9 +51,9 @@ All addresses are queried uniformly via `clearinghouseState`/`getOpenPositions` 
 
 Deterministic algorithm — same target state always produces the same position set.
 
-1. **Per-target multipliers** (`COPY_SCALE_MULTIPLIERS=2.0,2.5,0.5`, parallel to COPY_TRADERS):
+1. **Per-target multipliers** (`COPY_SCALE_MULTIPLIERS=2.0,2.5,1.0`, parallel to COPY_TRADERS):
    `ourMarginPct_i = (positionNotional / leverage / targetPortfolio) × multiplier_i`
-2. **Per-target demand cap** (`COPY_MAX_TARGET_DEMAND_PCT=1.0,1.0,0.15`, parallel to COPY_TRADERS): hard ceiling on a target's combined raw demand as a fraction of our portfolio. Defends against targets with volatile TVL whose `marginPct` spikes when they withdraw capital. Defaults to `1.0` (effectively unconstrained vs the 70% global cap).
+2. **Per-target demand cap** (`COPY_MAX_TARGET_DEMAND_PCT`, parallel to COPY_TRADERS): hard ceiling on a target's combined raw demand as a fraction of our portfolio. Defends against targets with volatile TVL whose `marginPct` spikes when they withdraw capital. Defaults to `1.0` (effectively unconstrained vs the 70% global cap). **Currently unset live** — all three targets are stable vaults, so no cap is needed (the bd9c `0.15` cap retired when bd9c was dropped 2026-06-18).
 3. **Global budget:** `MAX_COPY_ALLOCATION = 1.0 - independentAllocation` (default 0.70).
 4. **Priority ordering:** targets processed in COPY_TRADERS order (first = highest priority).
    First target's positions fully satisfied before second starts consuming budget.
@@ -62,11 +64,11 @@ Deterministic algorithm — same target state always produces the same position 
 
 No `/numTargets` divisor. Adding a target with 0 exposure has zero effect. Low-priority targets with many positions get whatever budget remains (tail positions may be dropped).
 
-**Adjust dead-band** (`COPY_ADJUST_MIN_NET_PCT`, default `0.015`): an `adjust` only fires when the margin delta exceeds **both** the per-symbol % threshold **and** this floor (~1.5% of our portfolio in margin terms). Heavily-netted symbols leave a small noisy *residual* (a big conviction position from one target nearly cancelled by an opposing target — e.g. two vaults short BTC vs bd9c long BTC at near-equal size). Without the floor, scan-to-scan wobble in either leg trips the % threshold every cycle and churns market-order fees. For large, un-netted positions the % threshold stays binding, so tracking fidelity is unchanged there.
+**Adjust dead-band** (`COPY_ADJUST_MIN_NET_PCT`, default `0.015`): an `adjust` only fires when the margin delta exceeds **both** the per-symbol % threshold **and** this floor (~1.5% of our portfolio in margin terms). Heavily-netted symbols leave a small noisy *residual* (a big conviction position from one target nearly cancelled by an opposing target at near-equal size). Without the floor, scan-to-scan wobble in either leg trips the % threshold every cycle and churns market-order fees. For large, un-netted positions the % threshold stays binding, so tracking fidelity is unchanged there. (Most relevant historically when bd9c traded BTC opposite the vaults; with all three targets now concentrated directional vaults the residual churn is smaller, but the floor still guards it.)
 
 ### Copy trading
 - Mode: `scaled`, position-based
-- Scale multipliers: **2.0, 2.5, 0.5** (per-target, parallel to COPY_TRADERS) — Archangel reduced 3.0 → 2.5 on 2026-05-22 for risk reduction
+- Scale multipliers: **2.0, 2.5, 1.0** (per-target, parallel to COPY_TRADERS) — Bitcoin MA 2.0, Archangel 2.5 (reduced 3.0 → 2.5 on 2026-05-22 for risk reduction), +convexity 1.0 (added 2026-06-18)
 - Leverage: exact 1:1 with target
 - Slippage: 1% for market orders
 - Scan interval: 5 minutes
@@ -75,7 +77,7 @@ No `/numTargets` divisor. Adding a target with 0 exposure has zero effect. Low-p
 | Setting | Value |
 |---|---|
 | Max allocation | 30% of vault |
-| Max concurrent positions | 3 (live; code default 5) |
+| Max concurrent positions | 2 (live `INDEPENDENT_MAX_POSITIONS=2`; code default 5) |
 | Leverage | 5x |
 | Max hold | 72h |
 | Hard stop | **-10%** from entry (price move, not margin), checked every 5-min scan |
@@ -93,16 +95,17 @@ ENABLE_INDEPENDENT_TRADING=true
 ENABLE_FUNDING_COLLECTION=true
 COPY_MODE=scaled
 COPY_POLL_INTERVAL_MINUTES=5
-COPY_SCALE_MULTIPLIERS=2.0,2.5,0.5
-COPY_MAX_TARGET_DEMAND_PCT=1.0,1.0,0.15
-COPY_ADJUST_THRESHOLDS=0.10,0.10,0.20
-COPY_EXCLUDE_SYMBOLS=,,HYPE
+COPY_SCALE_MULTIPLIERS=2.0,2.5,1.0
 MIN_ADJUSTMENT_VALUE_USD=20
-COPY_TRADERS=0xb1505...,0x8c7b...,0xbd9c...
-INDEPENDENT_MAX_POSITIONS=3
+COPY_TRADERS=0xb1505...,0x8c7b...,0x5661a0...
+INDEPENDENT_MAX_POSITIONS=2
 ```
 
-`COPY_EXCLUDE_SYMBOLS` is parallel to `COPY_TRADERS` (positional — empty entries preserved), symbols within a target separated by `|`. `,,HYPE` = only bd9c (3rd target) never copies HYPE. Excluded `(target, symbol)` pairs are also hidden from `IndependentTrader`'s conflict view, so independent trading is free to take them on its own signals. Set via gcloud with a custom delimiter so the commas survive: `--update-env-vars "^@^COPY_EXCLUDE_SYMBOLS=,,HYPE"`.
+Since 2026-06-18 the only non-default copy var set live is `COPY_SCALE_MULTIPLIERS` (Bitcoin MA 2.0, Archangel 2.5, +convexity 1.0). `COPY_MAX_TARGET_DEMAND_PCT`, `COPY_ADJUST_THRESHOLDS`, and `COPY_EXCLUDE_SYMBOLS` are **unset** (all targets are stable directional vaults, so their defaults — uncapped demand, 0.10 adjust threshold, no exclusions — apply). These bd9c-era overrides retired when bd9c was dropped.
+
+`COPY_EXCLUDE_SYMBOLS` (still available in code, default empty) is parallel to `COPY_TRADERS` (positional — empty entries preserved), symbols within a target separated by `|` (e.g. `,,HYPE` = only the 3rd target never copies HYPE). Excluded `(target, symbol)` pairs are also hidden from `IndependentTrader`'s conflict view, so independent trading is free to take them. Set via gcloud with a custom delimiter so commas survive: `--update-env-vars "^@^COPY_EXCLUDE_SYMBOLS=,,HYPE"`.
+
+> Multi-value copy vars (`COPY_TRADERS`, `COPY_SCALE_MULTIPLIERS`) contain commas, so set them with the `^@^` custom delimiter so the commas aren't parsed as separate vars: `--update-env-vars "^@^COPY_TRADERS=a,b,c@COPY_SCALE_MULTIPLIERS=2.0,2.5,1.0"`. Remove retired vars in the same call with `--remove-env-vars "..."`.
 
 ---
 
@@ -322,8 +325,8 @@ npm run docker-push
 ## Risk Management
 
 - Minimum adjustment/open notional: `MIN_ADJUSTMENT_VALUE_USD` (default $10, live $20). Gates full notional on open and delta notional on adjust — suppresses dust churn above the $10 exchange hard minimum.
-- Per-target adjust thresholds: `COPY_ADJUST_THRESHOLDS` (live `0.10,0.10,0.20` — bd9c wider to ignore intraday rotation). Each symbol inherits the threshold of whichever target contributes the most margin to it.
-- Per-target copy exclusion: `COPY_EXCLUDE_SYMBOLS` (live `,,HYPE` — bd9c's HYPE not copied). Parallel to `COPY_TRADERS`, symbols within a target `|`-separated. Excluded pairs generate no copy demand and are hidden from independent's conflict view (independent may then trade them). Default empty = no exclusions.
+- Per-target adjust thresholds: `COPY_ADJUST_THRESHOLDS` (parallel to `COPY_TRADERS`; default 0.10 each). Each symbol inherits the threshold of whichever target contributes the most margin to it. **Unset live since 2026-06-18** — all three targets use the 0.10 default (the bd9c `0.20` override retired with bd9c).
+- Per-target copy exclusion: `COPY_EXCLUDE_SYMBOLS` (parallel to `COPY_TRADERS`, symbols within a target `|`-separated). Excluded pairs generate no copy demand and are hidden from independent's conflict view (independent may then trade them). **Unset live since 2026-06-18** (default empty = no exclusions); the `,,HYPE` exclusion retired with bd9c.
 - Adjust dead-band: `COPY_ADJUST_MIN_NET_PCT` (default `0.015`). Absolute floor on the margin delta required to fire an `adjust`, ~1.5% of portfolio. Stops fee-churn on heavily-netted symbols whose traded size is a small noisy residual (see 2026-06-04 changelog). Binds only when the % threshold doesn't; large un-netted positions are unaffected.
 - Independent backstop stop: `INDEPENDENT_BACKSTOP_STOP_PCT` (default `0.12`). Exchange-side reduce-only stop-market trigger resting at -12% from entry on every independent position — caps gap risk past the scan-based -10% stop and covers bot downtime. 0 disables.
 - Slippage control: 1% for market orders
@@ -349,6 +352,20 @@ npm run docker-push
 ---
 
 ## Changelog
+
+### 2026-06-18 — Drop bd9c, add +convexity vault as 3rd copy target
+
+**Decision:** replaced the bd9c personal wallet with the **+convexity** vault (`0x5661a070eb13c7c55ac3210b2447d4bea426cbf5`) at a **1.0x** multiplier. Copy targets are now three stable directional vaults: Bitcoin MA (2.0x) → Archangel (2.5x) → +convexity (1.0x).
+
+**Why drop bd9c:** too volatile to copy. Its personal-wallet account value swung $67K↔$700K↔$89K (it was $89K at drop time), which spikes `marginPct` and our copied exposure for the same trade. Behaviorally it churned **35+ fills/day** (API-capped — true rate higher), HYPE-dominated — the opposite of the concentrated, low-frequency vaults we copy well. The 06-14 HYPE exclusion and the 05-19 multiplier cut (1.0→0.5) were both prior attempts to contain this drag; dropping it entirely is the clean fix.
+
+**Why +convexity:** sourced from a fresh scan of all ~9,460 HL vaults (`stats-data.hyperliquid.xyz/Mainnet/vaults`), filtered to open / TVL ≥ $200K / age ≥ 90d / positive month+all-time PnL / non-protocol, then verified for live copyability (`clearinghouseState`) and inspected book + fill history. +convexity: $666K TVL, ~10mo track record, **6% max DD** (best risk-adjusted in the set), and **all 2000 recent fills are BTC** (8.4/day) — a single-symbol concentrated directional vault, the same profile as Bitcoin MA. No HYPE, so independent's HYPE edge is untouched. (Runner-up "Deposit. Forget. Wake up richer" was rejected after fill-history check: 35+ fills/day, HYPE-heavy, recent-only winning streak — behaviorally another bd9c. HL's "578% APR" on it was recency-inflated; real ~31%/yr.)
+
+**Retired the bd9c-era overrides** (all were specific to bd9c's volatility/churn): `COPY_MAX_TARGET_DEMAND_PCT` (was `1.0,1.0,0.15`), `COPY_ADJUST_THRESHOLDS` (was `0.10,0.10,0.20`), and `COPY_EXCLUDE_SYMBOLS` (was `,,HYPE`) are now **unset** — all three vaults use code defaults (uncapped demand, 0.10 adjust threshold, no exclusions). Archangel's HYPE short continues to be copied as before; with no target excluding HYPE, independent defers on HYPE only when a target actually holds it.
+
+**Deploy impact:** the first scan reduced our BTC short by ~14% of portfolio margin — bd9c was contributing its demand-capped ~15% BTC-short leg, while +convexity is only lightly deployed (single BTC short ≈ 0.8% demand at 1x). So net BTC exposure *dropped*; +convexity's contribution grows as it sizes up. First-scan allocation: Bitcoin MA 14.1%, Archangel 8.7%, +convexity 0.8%, 46.4% of the 70% budget free.
+
+**Deployed** 2026-06-18 in revision `vault-3-00090-nvk` (env-only update, same image). Verified: `Copy Trading: ✅ ENABLED (3 targets)`, scan log `Targets: 0xb1505a, 0x8c7bd0, 0x5661a0` (bd9c gone, +convexity in), removed vars confirmed absent in `gcloud run services describe`, clean startup with `1 action` (the BTC reduction), no errors. instances=1 lock verified before deploy (serial revision swap, no rollout race).
 
 ### 2026-06-14 — Exclude bd9c's HYPE from copy trading (`COPY_EXCLUDE_SYMBOLS`)
 
